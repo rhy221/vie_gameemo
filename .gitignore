@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Data (large files — only track .gitkeep)
+data/raw_videos/*
+!data/raw_videos/.gitkeep
+data/processed/**/*
+!data/processed/**/.gitkeep
+data/features/*
+!data/features/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+data/annotations/*.json
+!data/annotations/.gitkeep
+
+# Outputs
+outputs/checkpoints/*
+!outputs/checkpoints/.gitkeep
+outputs/logs/*
+!outputs/logs/.gitkeep
+outputs/results/*
+!outputs/results/.gitkeep
+
+# WandB
+wandb/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# OS
+Thumbs.db
+
+# HuggingFace cache (set HF_HOME elsewhere)
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints

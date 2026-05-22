@@ -1,0 +1,61 @@
+# =============================================================================
+# Vie-GameEmo dependencies
+# Python 3.10+ required
+# Install: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+#
+# Note for CUDA: install torch separately from https://pytorch.org/get-started/
+# This file uses torch>=2.1, leaving CUDA variant to user (default = cu121).
+# =============================================================================
+
+# Core ML
+torch>=2.1.0
+transformers>=4.45.0
+accelerate>=0.34.0
+peft>=0.13.0
+bitsandbytes>=0.43.0  # 4-bit quantization
+sentencepiece>=0.2.0
+
+# RLVR (Stage 5 LLM-4)
+trl>=0.11.0
+vllm>=0.6.0  # Optional but recommended for fast GRPO generation
+
+# Audio
+librosa>=0.10.1
+soundfile>=0.12.1
+faster-whisper>=1.0.3
+# demucs>=4.0.1  # Optional: only if separating background music
+
+# Vision
+opencv-python>=4.10.0
+mediapipe>=0.10.14
+pillow>=10.4.0
+torchvision>=0.16.0
+
+# Multimodal (Qwen agents for Stage 0)
+# qwen-vl-utils>=0.0.5  # Helper for Qwen2.5-VL inputs
+
+# Data
+pyyaml>=6.0.2
+pydantic>=2.8.0
+numpy>=1.26.0
+scikit-learn>=1.5.0
+pandas>=2.2.0
+
+# Crawling
+yt-dlp>=2024.10.0
+
+# Annotation UI (optional)
+# label-studio>=1.13.0
+
+# Logging
+wandb>=0.18.0
+
+# Demo
+gradio>=4.44.0
+
+# Vietnamese NLP (optional, for tokenization stats)
+underthesea>=6.8.0
+
+# OpenFace: external binary, NOT a pip dependency.
+# Install separately from https://github.com/TadasBaltrusaitis/OpenFace
+# Configure binary path in config.yaml: annotation.openface.binary_path

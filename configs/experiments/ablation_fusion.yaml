@@ -1,0 +1,9 @@
+# Experiment: Pre-fusion ablation
+# Run training with each fusion type to compare.
+# Override fusion.type via CLI: --fusion late | early | mult | q_former | conv_attention_4m
+
+fusion:
+  type: "conv_attention_4m"   # change this and rerun
+
+wandb:
+  tags: ["ablation_fusion"]

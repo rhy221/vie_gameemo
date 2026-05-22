@@ -1,0 +1,127 @@
+"""Face cropping from webcam region.
+
+Given a frame and the detected webcam bounding box, crop the streamer's face
+region (with margin) and resize to target size for the face encoder.
+
+If no webcam was detected (no-facecam mode), this module is bypassed and
+the face encoder receives a zero placeholder.
+"""
+
+import logging
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from vie_gameemo.preprocess.webcam_detector import WebcamBBox
+
+logger = logging.getLogger(__name__)
+
+
+def extract_streamer_face(
+    frame: np.ndarray,
+    webcam_bbox: WebcamBBox,
+    target_size: tuple[int, int] = (224, 224),
+    margin: float = 0.2,
+    tight_crop: bool = True,
+) -> np.ndarray:
+    """Crop the streamer's face from a frame using the webcam region.
+
+    Args:
+        frame: Input frame as BGR ndarray (HxWx3).
+        webcam_bbox: Detected webcam region (normalized coords).
+        target_size: (width, height) for output.
+        margin: Fractional margin to expand around the webcam region.
+        tight_crop: If True, run MediaPipe inside webcam region for tighter crop.
+
+    Returns:
+        Cropped + resized face as BGR ndarray (target_size[1], target_size[0], 3).
+
+    Raises:
+        ValueError: If frame is empty.
+    """
+    if frame is None or frame.size == 0:
+        raise ValueError("Empty frame provided")
+
+    h, w = frame.shape[:2]
+
+    x1 = int((webcam_bbox.xmin - margin * webcam_bbox.width) * w)
+    y1 = int((webcam_bbox.ymin - margin * webcam_bbox.height) * h)
+    x2 = int((webcam_bbox.xmin + webcam_bbox.width * (1 + margin)) * w)
+    y2 = int((webcam_bbox.ymin + webcam_bbox.height * (1 + margin)) * h)
+
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+
+    if x2 <= x1 or y2 <= y1:
+        logger.warning("Invalid crop region; returning black placeholder")
+        return np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
+
+    cropped = frame[y1:y2, x1:x2]
+
+    if tight_crop:
+        cropped = _tight_face_crop(cropped, fallback=cropped)
+
+    resized = cv2.resize(cropped, target_size, interpolation=cv2.INTER_LINEAR)
+    return resized
+
+
+def batch_extract_faces(
+    frame_paths: list[Path],
+    webcam_bbox: WebcamBBox,
+    target_size: tuple[int, int] = (224, 224),
+    margin: float = 0.2,
+) -> np.ndarray:
+    """Batch face extraction for an entire clip's frames.
+
+    Args:
+        frame_paths: Paths to extracted frames (JPG).
+        webcam_bbox: Webcam region (same for whole clip).
+        target_size: Output size (width, height).
+        margin: Margin expansion.
+
+    Returns:
+        Stacked array of shape (N, H, W, 3) in BGR.
+    """
+    faces = []
+    for path in frame_paths:
+        frame = cv2.imread(str(path))
+        if frame is None:
+            logger.warning("Cannot read frame %s; using zeros", path)
+            faces.append(np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8))
+            continue
+        face = extract_streamer_face(frame, webcam_bbox, target_size, margin)
+        faces.append(face)
+    return np.stack(faces, axis=0)
+
+
+def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+    """Run lightweight MediaPipe inside webcam region for a tighter face crop.
+
+    Args:
+        region: BGR crop of the webcam region.
+        fallback: Returned as-is if MediaPipe finds no face in the region.
+
+    Returns:
+        Tighter face crop, or fallback if detection fails.
+    """
+    try:
+        import mediapipe as mp
+        detector = mp.solutions.face_detection.FaceDetection(
+            min_detection_confidence=0.5, model_selection=0
+        )
+        rgb = cv2.cvtColor(region, cv2.COLOR_BGR2RGB)
+        results = detector.process(rgb)
+        if results.detections:
+            det = results.detections[0]
+            bb = det.location_data.relative_bounding_box
+            h, w = region.shape[:2]
+            x1 = max(0, int(bb.xmin * w))
+            y1 = max(0, int(bb.ymin * h))
+            x2 = min(w, int((bb.xmin + bb.width) * w))
+            y2 = min(h, int((bb.ymin + bb.height) * h))
+            if x2 > x1 and y2 > y1:
+                return region[y1:y2, x1:x2]
+    except Exception as exc:
+        logger.debug("Tight crop failed: %s", exc)
+    return fallback

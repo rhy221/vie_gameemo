@@ -1,0 +1,8 @@
+# Experiment: LLM setup comparison (LLM-1 vs 2 vs 3 vs 4)
+# Switch llm.active_setup and rerun training/eval.
+
+llm:
+  active_setup: "llm4"   # llm1 (explainer) | llm2 (coreasoner) | llm3 (vlm) | llm4 (rlvr)
+
+wandb:
+  tags: ["ablation_llm"]

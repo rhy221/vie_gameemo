@@ -1,0 +1,482 @@
+# =============================================================================
+# Vie-GameEmo: Multimodal Emotion Recognition for VN Game Livestreams
+# Main configuration file
+#
+# Override any field via experiment configs in configs/experiments/*.yaml
+# CLI args take precedence over both.
+# =============================================================================
+
+project:
+  name: "vie-gameemo"
+  version: "0.1.0"
+  description: "Multimodal emotion recognition for Vietnamese game livestreams"
+
+# -----------------------------------------------------------------------------
+# Reproducibility & Logging
+# -----------------------------------------------------------------------------
+seed: 42
+
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+  file: "outputs/logs/vie_gameemo.log"
+  console: true
+
+wandb:
+  enabled: false  # set true if you want experiment tracking
+  project: "vie-gameemo"
+  entity: null  # your wandb username or team
+  tags: []
+
+# -----------------------------------------------------------------------------
+# Paths (all relative to project root unless absolute)
+# -----------------------------------------------------------------------------
+paths:
+  data_root: "data"
+  raw_videos: "data/raw_videos"
+  processed: "data/processed"
+  audios: "data/processed/audios"
+  frames: "data/processed/frames"
+  faces: "data/processed/faces"
+  contexts: "data/processed/contexts"
+  transcripts: "data/processed/transcripts"
+  annotations: "data/annotations"
+  features: "data/features"
+  cache: "data/cache"
+
+  outputs: "outputs"
+  checkpoints: "outputs/checkpoints"
+  results: "outputs/results"
+
+# -----------------------------------------------------------------------------
+# STAGE 0: Data Curation & Annotation
+# Runs INDEPENDENTLY from training pipeline.
+# Heavy compute (annotation needs large LLMs).
+# -----------------------------------------------------------------------------
+data:
+  # Dataset scaling targets
+  dataset_size:
+    target_total: 600       # clips after annotation
+    pilot: 50               # for initial verification
+    min_viable: 300         # if compute is constrained
+
+  # Genre distribution (sums to 1.0)
+  genre_distribution:
+    moba: 0.25              # LMHT, Lien Quan
+    fps: 0.25               # Valorant, CSGO, PUBG
+    horror: 0.15            # Resident Evil, Phasmophobia
+    casual: 0.15            # Stumble Guys, Among Us
+    rpg: 0.10               # Genshin, Persona
+    mobile: 0.10
+
+  # Clip splitting
+  clip:
+    duration_seconds: 25    # target length per clip
+    min_seconds: 15
+    max_seconds: 30
+
+  # Train/val/test split (stratified by class + genre + code-switching)
+  split:
+    train: 0.70
+    val: 0.15
+    test_in_distribution: 0.10
+    test_out_of_distribution: 0.05  # streamers not in train
+
+# Crawling (yt-dlp)
+crawl:
+  video_format: "best[height<=720]"   # 720p enough for face
+  audio_format: "bestaudio"
+  source_list: "data/source_urls.txt"  # one URL per line
+  rate_limit_kbps: 2000                # be polite
+  retry_attempts: 3
+
+# Preprocessing (ffmpeg + opencv)
+preprocess:
+  audio:
+    sample_rate: 16000
+    channels: 1            # mono
+    format: "wav"
+  frames:
+    fps: 2                 # extract at 2fps (biểu cảm chậm)
+    format: "jpg"
+    quality: 90
+
+  # Optional: separate background music from speaker
+  demucs:
+    enabled: false         # only if EDA shows music too loud
+    model: "htdemucs"
+
+# Multi-agent annotation pipeline (Section 2.3 of spec)
+annotation:
+  enabled: true
+
+  # OpenFace AU extraction
+  openface:
+    binary_path: "OpenFace_2.2.0/build/bin/FeatureExtraction"
+    output_format: "csv"
+
+  # Peak frame detection
+  peak_frame:
+    method: "max_au_intensity"   # alternatives: middle, attention_pool
+    target_aus: [1, 2, 4, 6, 12, 25]  # emotion-relevant AUs
+
+  # Agent: Visual objective (Cvod) — Qwen2.5-VL
+  qwen_vl:
+    model_name: "Qwen/Qwen2.5-VL-7B-Instruct"   # 32B/72B if A100 available
+    quantization: "4bit"        # "4bit" | "8bit" | "none"
+    max_new_tokens: 200
+    temperature: 0.3
+    prompt: |
+      Mô tả ngắn gọn (3-4 câu) cảnh trong frame này bằng tiếng Việt.
+      Tập trung vào: tư thế, hành động, môi trường streamer.
+      Không suy luận cảm xúc.
+
+  # Agent: Audio prosody (Catd) — Qwen2-Audio
+  qwen_audio:
+    model_name: "Qwen/Qwen2-Audio-7B-Instruct"
+    quantization: "4bit"
+    max_new_tokens: 200
+    prompt: |
+      Phân tích đặc điểm âm thanh trong clip này bằng tiếng Việt:
+      - Tốc độ nói (chậm/trung bình/nhanh)
+      - Cao độ giọng (trầm/trung/cao)
+      - Năng lượng (yếu/trung/mạnh)
+      - Có tiếng la, cười, im lặng không?
+
+  # ASR for transcript (Cls)
+  whisper_asr:
+    model_name: "openai/whisper-large-v3"
+    backend: "faster-whisper"
+    compute_type: "float16"
+    language: "vi"
+    initial_prompt: "Game streaming Vietnamese with English gaming terms like clutch, ace, GG, headshot, POG, ez"
+    vad_filter: true
+    no_speech_threshold: 0.6
+
+  # Consolidator — merges all signals into final reasoning
+  consolidator:
+    model_name: "Qwen/Qwen2.5-7B-Instruct"   # 32B/72B if A100 available
+    quantization: "4bit"
+    max_new_tokens: 400
+    temperature: 0.5
+    output_format: "structured"   # <think>...</think><answer>...</answer>
+
+  # Batching & memory management
+  batch_size: 16            # clips per phase
+  memory_strategy: "serial"  # load → process → unload each agent
+
+# Labeling schemas (try both in ablation)
+labeling:
+  primary_schema: "gaming_7"   # "ekman_7" or "gaming_7"
+  schemas:
+    ekman_7:
+      labels: ["vui", "buon", "tuc_gian", "so_hai", "ngac_nhien", "ghe_tom", "trung_tinh"]
+    gaming_7:
+      labels: ["hype", "tilted", "focused", "disappointed", "shocked", "amused", "neutral"]
+
+  # Annotation reliability
+  min_cohens_kappa: 0.6
+  num_annotators: 2
+
+# -----------------------------------------------------------------------------
+# STAGE 1: Demuxing (audio + frames extraction)
+# Light compute, runs alongside Stage 0
+# -----------------------------------------------------------------------------
+# (Settings already covered in preprocess block above)
+
+# -----------------------------------------------------------------------------
+# STAGE 2a: Audio Encoder
+# -----------------------------------------------------------------------------
+audio_encoder:
+  type: "ast"   # "ast" | "wav2vec2" | "hubert" (for ablation)
+  model_name: "MIT/ast-finetuned-audioset-10-10-0.4593"
+  target_tokens: 64        # adaptive pool to this length
+  spectrogram:
+    n_mels: 128
+    win_length_ms: 25
+    hop_length_ms: 10
+    fmin: 20
+    fmax: 8000
+    normalize: "per_clip_zscore"
+
+# -----------------------------------------------------------------------------
+# STAGE 2b: Visual Dual-Path Encoder (Section 5 of spec — DOMAIN ADAPTED)
+# -----------------------------------------------------------------------------
+visual_encoder:
+  strategy: "dual_path"   # "full_frame" | "face_only" | "dual_path" (recommended)
+
+  # Webcam region detection (separates streamer face from in-game NPC faces)
+  webcam_detector:
+    backend: "mediapipe"
+    min_detection_confidence: 0.7
+    sample_n_frames: 30          # frames sampled to find stable region
+    clustering:
+      method: "dbscan"
+      eps: 0.05
+      min_samples: 5
+    stability_threshold: 0.5     # cluster_size / sample_n
+    edge_bias: 0.3               # webcam usually within 0.3 of edges
+    fallback: "no_face"          # if detection fails entirely
+
+  # Path 1: face encoder (streamer face only)
+  face_encoder:
+    model_name: "trpakov/vit-face-expression"   # ViT-FER, pretrain AffectNet
+    crop_margin: 0.2             # 20% expand around detected face
+    target_size: [224, 224]
+    dual_view:
+      global:
+        source: "middle_frame"   # heuristic: peak emotion often mid-clip
+      temporal:
+        n_frames: 16             # sweet spot per spec ablation
+        spatial_pool: [2, 2]     # 2x2 → 64 tokens/frame
+        pool_method: "attention" # "mean" | "max" | "attention" | "video_native"
+
+  # Path 2: context encoder (gameplay context)
+  context_encoder:
+    model_name: "google/vit-base-patch16-224"   # ImageNet pretrain
+    n_frames: 16
+    target_size: [224, 224]
+    temporal_pool: "mean"
+
+# -----------------------------------------------------------------------------
+# STAGE 2c: Text Encoder
+# -----------------------------------------------------------------------------
+text_encoder:
+  type: "xlmr"   # "xlmr" | "phobert" (for ablation)
+  model_name: "FacebookAI/xlm-roberta-base"
+  max_length: 128
+  pooling: "cls"   # "cls" | "mean"
+
+# -----------------------------------------------------------------------------
+# STAGE 3: Conv-Attention 4-Modality Fusion
+# -----------------------------------------------------------------------------
+fusion:
+  type: "conv_attention_4m"   # "late" | "early" | "mult" | "q_former" | "conv_only" | "attn_only" | "conv_attention_4m"
+
+  d_model: 768
+  n_modalities: 4              # audio + face + context + text
+  n_conv_blocks: 4
+  kernel_size: 3
+  activation: "switch"         # x * sigmoid(x), Swish-like
+  attn_hidden_div: 2           # hidden dim = d_model * n_modalities / 2
+
+  modality_dropout:
+    enabled: true
+    p: 0.3                     # 30% iter drop one modality
+
+  # Align sequence lengths to this target before fusion
+  align_to: "audio"            # all modality seqs aligned to audio (64 tokens)
+
+  # Return attention weights for interpretability
+  return_attention: true
+
+# -----------------------------------------------------------------------------
+# STAGE 4: Emotion Classifier
+# -----------------------------------------------------------------------------
+classifier:
+  type: "mlp"
+  hidden_dim: 256
+  dropout: 0.3
+  activation: "gelu"
+  n_classes: 7                 # match labeling.primary_schema
+
+  loss:
+    type: "focal"              # "ce" | "weighted_ce" | "focal"
+    focal:
+      alpha: 1.0
+      gamma: 2.0
+
+# -----------------------------------------------------------------------------
+# STAGE 5: LLM Reasoner — 4 setups to compare
+# -----------------------------------------------------------------------------
+llm:
+  # Active setup for current run
+  active_setup: "llm1"   # "llm1" | "llm2" | "llm3" | "llm4"
+
+  # Shared base model (for setups that need one)
+  base_model:
+    name: "Qwen/Qwen2.5-7B-Instruct"
+    fallback: "Qwen/Qwen2.5-1.5B-Instruct"   # if no A100
+    quantization: "4bit"
+    device_map: "auto"
+    max_new_tokens: 300
+    temperature: 0.7
+
+  # Setup 1: Post-hoc Explainer (no training)
+  llm1:
+    prompt_template: |
+      Streamer được dự đoán đang ở trạng thái: {label}.
+
+      Bằng chứng đa phương thức:
+      - Khuôn mặt (Action Units): {face_aus}
+      - Bối cảnh game: {game_context}
+      - Giọng nói: pitch_avg={pitch_hz}Hz, energy={rms_db}dB, shout={shout}
+      - Lời nói: "{transcript}"
+
+      Hãy giải thích ngắn gọn (dưới 100 từ) bằng tiếng Việt vì sao streamer
+      đang ở trạng thái này. Nếu có slang gaming tiếng Anh, hãy giải thích nghĩa.
+
+  # Setup 2: Co-Reasoner (modality-to-text + LLM)
+  llm2:
+    use_modality_descriptions: true   # convert each modality to text first
+
+  # Setup 3: VLM End-to-End with LoRA
+  llm3:
+    vlm_model: "Qwen/Qwen2.5-VL-7B-Instruct"
+    n_input_frames: 8
+    include_spectrogram_image: true
+    lora:
+      rank: 16
+      alpha: 32
+      dropout: 0.05
+      target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+  # Setup 4: RLVR-trained (R1-Omni-inspired)
+  llm4:
+    cold_start:
+      n_samples: 100             # samples from multi-agent reasoning for SFT init
+      epochs: 2
+      learning_rate: 5e-5
+
+    rlvr:
+      algorithm: "grpo"          # Group Relative Policy Optimization
+      num_generations: 4         # G in GRPO
+      learning_rate: 1e-5
+      beta: 0.04                 # KL coefficient
+      num_epochs: 2
+      batch_size: 2
+      gradient_accumulation: 8
+      max_prompt_length: 512
+      max_completion_length: 512
+      use_vllm: true
+
+      reward:
+        accuracy_weight: 1.0
+        format_weight: 1.0
+        format_pattern: '<think>.*</think>.*<answer>.*</answer>'
+
+# -----------------------------------------------------------------------------
+# Training: Perception-to-Cognition Curriculum (Section 10 of spec)
+# -----------------------------------------------------------------------------
+training:
+  # Stage 1: Perception (classification only)
+  perception:
+    epochs: 30
+    batch_size: 16
+    gradient_accumulation: 4    # effective batch = 64
+    learning_rate:
+      fusion: 2.0e-4
+      classifier: 2.0e-4
+      encoders: 0.0             # frozen
+    weight_decay: 0.01
+    optimizer: "adamw"
+    scheduler: "cosine"
+    warmup_ratio: 0.1
+    grad_clip: 1.0
+    mixed_precision: "bf16"     # "no" | "fp16" | "bf16"
+    gradient_checkpointing: false
+
+    early_stopping:
+      enabled: true
+      patience: 5
+      monitor: "val_macro_f1"
+      mode: "max"
+
+  # Stage 2: Cognition (joint classification + reasoning)
+  cognition:
+    epochs: 10
+    batch_size: 4
+    gradient_accumulation: 8
+    learning_rate:
+      llm: 2.0e-5
+      llm_adapter: 2.0e-4
+      fusion: 0.0               # frozen after Stage 1
+      classifier: 0.0           # frozen after Stage 1
+    loss_weights:
+      classification: 1.0
+      reasoning_lm: 0.5
+
+    # LoRA for LLM fine-tune
+    lora:
+      enabled: true
+      rank: 16
+      alpha: 32
+      target_modules: ["q_proj", "v_proj"]
+
+# -----------------------------------------------------------------------------
+# Evaluation
+# -----------------------------------------------------------------------------
+evaluation:
+  metrics:
+    - "accuracy"
+    - "weighted_f1"
+    - "macro_f1"
+    - "uar"                # unweighted average recall
+    - "per_class_f1"
+    - "confusion_matrix"
+
+  # Strategy A/B/C ablation
+  strategy_ablation:
+    enabled: true
+    strategies:
+      - "full_frame"       # A (paper baseline)
+      - "face_only"        # B
+      - "dual_path"        # C (recommended)
+
+  # Per-genre breakdown
+  per_genre: true
+
+  # Human eval (LLM explanation quality)
+  human_eval:
+    n_samples: 50
+    n_reviewers: 3
+    likert_scale: 5
+
+  # OOD generalization (R1-Omni style)
+  ood:
+    enabled: true
+    method: "unseen_streamer"   # leave-one-streamer-out
+
+  # Statistical significance
+  n_seeds: 3
+  paired_t_test: true
+
+# -----------------------------------------------------------------------------
+# Inference: Batch vs Real-time
+# -----------------------------------------------------------------------------
+inference:
+  mode: "batch"   # "batch" | "realtime"
+
+  batch:
+    batch_size: 8
+    include_llm_explanation: true
+
+  realtime:
+    sliding_window_seconds: 5
+    step_seconds: 1
+    max_latency_ms: 600
+    skip_llm: true              # LLM async on user click
+    use_compressed_models: true # MobileViT, Whisper-tiny, etc.
+
+# -----------------------------------------------------------------------------
+# Compute & Hardware
+# -----------------------------------------------------------------------------
+compute:
+  device: "auto"   # "cuda" | "cpu" | "auto"
+  num_workers: 4   # DataLoader workers
+  pin_memory: true
+
+  # Profile: "a100" (Section 14.1) or "colab" (Section 14.2)
+  profile: "colab"  # affects model size choices in llm.base_model
+
+  # Memory limits for annotation pipeline
+  annotation_vram_gb: 15  # T4 = 16, leave 1GB headroom
+
+# -----------------------------------------------------------------------------
+# Feature Caching (precompute frozen encoder outputs)
+# -----------------------------------------------------------------------------
+feature_cache:
+  enabled: true
+  format: "pt"   # torch.save
+  recompute_if_config_changed: true
+  store_attention_weights: false   # set true for interpretability runs

@@ -1,0 +1,11 @@
+# Experiment: Strategy B (Face crop only, no context path)
+
+visual_encoder:
+  strategy: "face_only"
+
+# 3 modalities: audio + face + text
+fusion:
+  n_modalities: 3
+
+wandb:
+  tags: ["ablation_strategy_b", "face_only"]

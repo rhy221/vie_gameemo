@@ -1,0 +1,11 @@
+# Experiment: Strategy C (Dual-path face + context, RECOMMENDED)
+# This matches the default config.yaml; included here for explicit ablation runs.
+
+visual_encoder:
+  strategy: "dual_path"
+
+fusion:
+  n_modalities: 4
+
+wandb:
+  tags: ["ablation_strategy_c", "dual_path", "recommended"]
