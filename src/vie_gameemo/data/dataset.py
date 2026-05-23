@@ -32,7 +32,7 @@ class VieGameEmoDataset(Dataset):
         features_dir: Path to directory of cached features (.pt files).
         split: 'train' | 'val' | 'test_id' | 'test_ood'.
         mode: 'cached' (load .pt) | 'raw' (encode on-the-fly, needs encoders).
-        label_schema: 'gaming_7' | 'ekman_7'.
+        label_schema: 'gaming_9' | 'ekman_7'.
         split_manifest: Optional path to a JSON mapping clip_id → split name.
             If None, a manifest is created from all annotations with a default split.
     """
@@ -43,7 +43,7 @@ class VieGameEmoDataset(Dataset):
         features_dir: Path,
         split: str = "train",
         mode: str = "cached",
-        label_schema: str = "gaming_7",
+        label_schema: str = "gaming_9",
         split_manifest: Path | None = None,
     ) -> None:
         self.annotations_dir = Path(annotations_dir)

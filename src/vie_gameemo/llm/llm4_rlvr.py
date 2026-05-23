@@ -25,7 +25,7 @@ from vie_gameemo.llm.llm2_coreasoner import LLM2CoReasoner
 
 logger = logging.getLogger(__name__)
 
-_VALID_LABELS = ["hype", "tilted", "focused", "disappointed", "shocked", "amused", "neutral"]
+_VALID_LABELS = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
 
 # ---------------------------------------------------------------------------

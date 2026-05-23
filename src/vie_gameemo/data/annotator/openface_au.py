@@ -63,15 +63,35 @@ def extract_aus(
         "-out_dir", str(output_dir),
         "-aus",
     ]
-    logger.info("Running OpenFace on %s", video_path.name)
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
+    # OpenFace resolves its model directory ("model/") relative to the
+    # binary's location (i.e. build/bin/model after a standard CMake build).
+    # Run from that directory so model lookup is unambiguous.
+    run_cwd = openface_binary.parent
+    model_dir = run_cwd / "model"
+    if not model_dir.exists():
         raise RuntimeError(
-            f"OpenFace failed on {video_path}: {result.stderr[:500]}"
+            f"OpenFace model directory missing: {model_dir}. "
+            "Did download_models.sh complete? "
+            f"Listing of {run_cwd}: {sorted(p.name for p in run_cwd.iterdir()) if run_cwd.exists() else '<missing>'}"
         )
 
+    logger.info("Running OpenFace on %s (cwd=%s)", video_path.name, run_cwd)
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(run_cwd))
+
+    # OpenFace sometimes exits non-zero but still writes a valid CSV; only
+    # treat as failure if the CSV is also missing. Surface stdout+stderr
+    # because OpenFace writes most diagnostics to stdout.
     if not csv_path.exists():
-        raise RuntimeError(f"OpenFace did not produce CSV at: {csv_path}")
+        diag = ((result.stderr or "") + "\n" + (result.stdout or "")).strip() or "(no output)"
+        raise RuntimeError(
+            f"OpenFace failed on {video_path} (rc={result.returncode}, cwd={run_cwd}): "
+            f"{diag[:800]}"
+        )
+    if result.returncode != 0:
+        logger.warning(
+            "OpenFace returned rc=%d on %s but CSV exists — continuing. stderr=%r",
+            result.returncode, video_path.name, (result.stderr or "")[:200],
+        )
 
     return _parse_au_csv(csv_path, target_aus)
 

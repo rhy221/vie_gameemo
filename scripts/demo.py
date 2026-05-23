@@ -25,24 +25,28 @@ from vie_gameemo.utils.seed import set_seed
 
 logger = logging.getLogger(__name__)
 
-_EMOTION_LABELS = ["hype", "tilted", "focused", "disappointed", "shocked", "amused", "neutral"]
+_EMOTION_LABELS = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 _EMOTION_COLORS = {
-    "hype": "#FF6B35",
-    "tilted": "#C0392B",
-    "focused": "#2980B9",
-    "disappointed": "#7F8C8D",
-    "shocked": "#8E44AD",
-    "amused": "#27AE60",
-    "neutral": "#95A5A6",
+    "neutral":   "#95A5A6",
+    "focus":     "#2980B9",
+    "hype":      "#FF6B35",
+    "amused":    "#27AE60",
+    "tilted":    "#C0392B",
+    "sad":       "#5D6D7E",
+    "shocked":   "#8E44AD",
+    "fear":      "#34495E",
+    "disgusted": "#7D6608",
 }
 _EMOTION_EMOJI = {
-    "hype": "🔥",
-    "tilted": "😤",
-    "focused": "🎯",
-    "disappointed": "😞",
-    "shocked": "😱",
-    "amused": "😄",
-    "neutral": "😐",
+    "neutral":   "😐",
+    "focus":     "🎯",
+    "hype":      "🔥",
+    "amused":    "😄",
+    "tilted":    "😤",
+    "sad":       "😢",
+    "shocked":   "😱",
+    "fear":      "😨",
+    "disgusted": "🤢",
 }
 
 

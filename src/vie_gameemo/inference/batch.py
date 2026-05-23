@@ -14,7 +14,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-_EMOTION_LABELS = ["hype", "tilted", "focused", "disappointed", "shocked", "amused", "neutral"]
+_EMOTION_LABELS = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
 
 def batch_inference(
