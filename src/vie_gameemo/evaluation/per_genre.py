@@ -16,7 +16,7 @@ from vie_gameemo.evaluation.metrics import compute_metrics
 
 logger = logging.getLogger(__name__)
 
-_EMOTION_LABELS = ["hype", "tilted", "focused", "disappointed", "shocked", "amused", "neutral"]
+_EMOTION_LABELS = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 _LABEL2IDX = {l: i for i, l in enumerate(_EMOTION_LABELS)}
 
 

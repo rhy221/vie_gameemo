@@ -167,12 +167,28 @@ annotation:
 
 # Labeling schemas (try both in ablation)
 labeling:
-  primary_schema: "gaming_7"   # "ekman_7" or "gaming_7"
+  primary_schema: "gaming_9"   # "ekman_7" or "gaming_9"
   schemas:
     ekman_7:
       labels: ["vui", "buon", "tuc_gian", "so_hai", "ngac_nhien", "ghe_tom", "trung_tinh"]
-    gaming_7:
-      labels: ["hype", "tilted", "focused", "disappointed", "shocked", "amused", "neutral"]
+    gaming_9:
+      # Order is canonical; class indices follow this order (0..8).
+      # See docs/annotation_guideline.md for definitions and decision rules.
+      labels: ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
+
+  # Target per-class share of the dataset (sums to 1.0).
+  # Tiered by livestream prevalence: common > medium > rare.
+  # 600 clips → 84 / 78 / 78 / 66 / 66 / 60 / 66 / 54 / 48
+  class_distribution:
+    neutral:   0.14    # common: baseline/idle/explaining
+    focus:     0.13    # common: tryhard, intense gameplay
+    hype:      0.13    # common: clutch, ace, win
+    amused:    0.11    # medium: laugh, funny moment
+    tilted:    0.11    # medium: frustration, anger
+    sad:       0.10    # medium: loss, regret
+    shocked:   0.11    # medium: surprise, jump scare reaction
+    fear:      0.09    # rare:   horror games, panic
+    disgusted: 0.08    # rare:   gore, bad teammate, cringe
 
   # Annotation reliability
   min_cohens_kappa: 0.6
@@ -278,7 +294,7 @@ classifier:
   hidden_dim: 256
   dropout: 0.3
   activation: "gelu"
-  n_classes: 7                 # match labeling.primary_schema
+  n_classes: 9                 # match labeling.primary_schema (gaming_9)
 
   loss:
     type: "focal"              # "ce" | "weighted_ce" | "focal"

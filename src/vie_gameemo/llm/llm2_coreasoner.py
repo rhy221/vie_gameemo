@@ -33,7 +33,7 @@ Hãy phân tích và dự đoán cảm xúc của streamer theo format:
 <answer>[một nhãn cảm xúc từ danh sách trên]</answer>
 """
 
-_VALID_LABELS = ["hype", "tilted", "focused", "disappointed", "shocked", "amused", "neutral"]
+_VALID_LABELS = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
 
 class LLM2CoReasoner(BaseLLMReasoner):

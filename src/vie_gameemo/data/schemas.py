@@ -13,17 +13,20 @@ from pydantic import BaseModel, field_validator, model_validator
 
 
 class EmotionLabel(str, Enum):
-    """Gaming-specific emotion labels (primary schema).
+    """Gaming-specific emotion labels (primary schema, `gaming_9`).
 
-    Use the schema selected in `config.labeling.primary_schema`.
+    Class index = declaration order (0..8). Do not reorder without rebuilding
+    cached features and checkpoints. See `docs/annotation_guideline.md`.
     """
-    HYPE = "hype"
-    TILTED = "tilted"
-    FOCUSED = "focused"
-    DISAPPOINTED = "disappointed"
-    SHOCKED = "shocked"
-    AMUSED = "amused"
-    NEUTRAL = "neutral"
+    NEUTRAL = "neutral"        # 0 — baseline / idle / explanatory
+    FOCUS = "focus"            # 1 — tryhard, intense concentration
+    HYPE = "hype"              # 2 — clutch, ace, victory adrenaline
+    AMUSED = "amused"          # 3 — laughter, funny moment
+    TILTED = "tilted"          # 4 — anger, frustration, ragequit
+    SAD = "sad"                # 5 — loss, regret, disappointment
+    SHOCKED = "shocked"        # 6 — surprise (positive or negative)
+    FEAR = "fear"              # 7 — horror, jump-scare, panic
+    DISGUSTED = "disgusted"    # 8 — revulsion, cringe, contempt
 
 
 class EkmanLabel(str, Enum):
