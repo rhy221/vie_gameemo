@@ -192,7 +192,7 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
     frames_dir.mkdir(exist_ok=True)
 
     extract_audio(clip_path, audio_path)
-    extract_frames(clip_path, frames_dir, target_fps=2)
+    extract_frames(clip_path, frames_dir, target_fps=4)
     frame_paths = sorted(frames_dir.glob("*.jpg"))
 
     features: dict = {}

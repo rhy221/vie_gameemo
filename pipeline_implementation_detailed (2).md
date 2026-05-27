@@ -319,18 +319,25 @@ Workflow:
 - Có **reasoning supervision** cho LLM-2 và LLM-3 training
 - Scale dễ → có thể lên 1000+ clip nếu cần
 
-### 2.6. Schema dán nhãn (giữ nguyên 2 schema)
+### 2.6. Schema dán nhãn
 
-**Schema A — Ekman 7:** `vui, buồn, tức giận, sợ hãi, ngạc nhiên, ghê tởm, trung tính`
+**Schema A — Ekman 7 (tham khảo):** `vui, buồn, tức giận, sợ hãi, ngạc nhiên, ghê tởm, trung tính`
 
-**Schema B — Gaming-specific 7:**
-1. Hype/Phấn khích
-2. Tilted/Cay cú
-3. Focused/Tập trung
-4. Disappointed/Thất vọng
-5. Shocked/Sốc
-6. Amused/Hài hước
-7. Neutral/Trung tính
+**Schema B — Gaming-specific 9 (gaming_9) — schema chính thức (`n_classes=9`):**
+
+| # | Nhãn | Tiếng Việt | Đặc điểm |
+|---|------|-----------|----------|
+| 0 | neutral   | Trung tính   | Idle, giải thích, chờ |
+| 1 | focus     | Tập trung    | Tryhard, căng thẳng, nghiêm túc |
+| 2 | hype      | Phấn khích   | Clutch, ace, thắng lớn |
+| 3 | amused    | Hài hước     | Cười, khoảnh khắc buồn cười |
+| 4 | tilted    | Cay cú       | Tức giận, thất vọng, toxic |
+| 5 | sad       | Buồn         | Thua, hối hận, chán nản |
+| 6 | shocked   | Sốc          | Ngạc nhiên mạnh, jump scare |
+| 7 | fear      | Sợ hãi       | Game kinh dị, hoảng loạn |
+| 8 | disgusted | Ghê tởm      | Gore, đồng đội tệ, cringe |
+
+> **Lưu ý:** Toàn bộ codebase dùng `gaming_9` với `n_classes=9`. Schema Ekman 7 chỉ dùng trong ablation so sánh.
 
 ### 2.7. Thử nghiệm Stage 0
 
@@ -352,7 +359,7 @@ Giữ nguyên như pipeline cũ — không có cải tiến từ paper.
 | | Mô tả |
 |---|---|
 | **Input** | 1 clip MP4 |
-| **Output** | `audio.wav` 16kHz mono + `frames/*.jpg` @ 2fps |
+| **Output** | `audio.wav` 16kHz mono + `frames/*.jpg` @ 4fps |
 | **Công cụ** | `ffmpeg`, OpenCV |
 
 ### 3.2. Code mẫu
@@ -373,10 +380,10 @@ def preprocess_clip(clip_path, output_dir):
         "-y", str(out / "audio.wav")
     ], check=True)
     
-    # Tách frames @ 2fps
+    # Tách frames @ 4fps
     cap = cv2.VideoCapture(clip_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
-    step = int(fps / 2)
+    step = int(fps / 4)
     saved = 0
     for frame_idx in range(int(cap.get(cv2.CAP_PROP_FRAME_COUNT))):
         ret, frame = cap.read()
@@ -1192,7 +1199,7 @@ Giữ nguyên như pipeline cũ.
 
 ```python
 class EmotionClassifier(nn.Module):
-    def __init__(self, dim=768, hidden=256, n_classes=7, dropout=0.3):
+    def __init__(self, dim=768, hidden=256, n_classes=9, dropout=0.3):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden),
@@ -1462,7 +1469,7 @@ class EmotionLLaMAv2Style(nn.Module):
         
         # Trainable: 4-modality fusion
         self.fusion = ConvAttentionModule4M(dim=768, n_modalities=4)
-        self.classifier = EmotionClassifier(dim=768, n_classes=7)
+        self.classifier = EmotionClassifier(dim=768, n_classes=9)
         
         # Webcam detector
         self.webcam_detector = WebcamDetector()

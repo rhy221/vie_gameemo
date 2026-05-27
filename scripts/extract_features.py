@@ -118,14 +118,11 @@ def main() -> int:
         )
 
     if "text" in args.modalities:
-        from vie_gameemo.encoders.text_xlmr import XLMRTextEncoder
-        logger.info("Loading text encoder...")
-        encoders["text"] = XLMRTextEncoder(
-            model_name=cfg.text_encoder.model_name,
-            max_length=cfg.text_encoder.max_length,
-            pooling=cfg.text_encoder.pooling,
-            device=device,
-        )
+        from vie_gameemo.encoders.text_xlmr import build_text_encoder
+        logger.info("Loading text encoder (type=%s)...", getattr(cfg.text_encoder, "type", "xlmr"))
+        enc = build_text_encoder(cfg.text_encoder)
+        enc = enc.to(device)
+        encoders["text"] = enc
 
     n_done = 0
     for ann_file in annotation_files:
