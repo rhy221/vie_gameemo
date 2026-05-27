@@ -59,12 +59,12 @@
    ┌────────▼────────┐         ┌───────────▼─────────┐         ┌──────────▼─────────┐
    │  Stage 2a       │         │  Stage 2b           │         │  Stage 2c          │
    │  Audio          │         │  Visual DUAL-PATH   │         │  Text              │
-   │  → spectrogram  │         │  (DOMAIN-ADAPTED)   │         │  → Whisper ASR     │
-   │  → AST encoder  │         │ ┌─────────────────┐ │         │  → XLM-R encoder   │
-   │                 │         │ │ Path 1: FACE    │ │         │                    │
-   │                 │         │ │ Webcam detect   │ │         │                    │
-   │                 │         │ │ + crop+ViT-FER  │ │         │                    │
-   │                 │         │ │ → h_face        │ │         │                    │
+   │  → spectrogram  │         │  (DOMAIN-ADAPTED)   │         │  → Whisper/        │
+   │  → AST encoder  │         │ ┌─────────────────┐ │         │    PhoWhisper ASR  │
+   │                 │         │ │ Path 1: FACE    │ │         │  → BARTpho (opt)   │
+   │                 │         │ │ Webcam detect   │ │         │  → XLM-R/PhoBERT   │
+   │                 │         │ │ + crop+ViT-FER  │ │         │    encoder         │
+   │                 │         │ │ → h_face        │ │         │  (config-switched) │
    │                 │         │ ├─────────────────┤ │         │                    │
    │                 │         │ │ Path 2: CONTEXT │ │         │                    │
    │                 │         │ │ Full-frame ViT  │ │         │                    │
@@ -127,7 +127,7 @@
 | **1. Demuxing** | MP4 | audio.wav + frames | ffmpeg | ✅ |
 | **2a. Audio→Spec→Enc** | wav 16kHz | h_audio (768d) | librosa + **AST** | ✅ |
 | **2b. Visual Dual-Path** | frames | h_face + h_ctx (2×768d) | **Webcam detect + ViT-FER + ViT-ImageNet** | ✅ |
-| **2c. ASR→Text→Enc** | wav | h_text (768d) | **Whisper-v3 + XLM-R** | ✅ |
+| **2c. ASR→Text→Enc** | wav | h_text (768d) | **Whisper/PhoWhisper + BARTpho(opt) + XLM-R/PhoBERT** | ✅ |
 | **3. Pre-Fusion** | 4 × 768d | u_fusion (768d) | **Conv-Attention module** | ✅ |
 | **4. Classifier** | u_fusion | label probs | MLP 2-layer | ✅ |
 | **5. LLM** | label + features | Giải thích VN | **Qwen2.5-7B** (4 setup) | ✅ |
@@ -142,7 +142,7 @@
 | | Mô tả |
 |---|---|
 | **Input** | Danh sách URL kênh YouTube/Facebook Gaming của streamer VN |
-| **Output** | 500-800 clip MP4 (15-30 giây) + CSV nhãn + **reasoning annotations** |
+| **Output** | 500-800 clip MP4 (5 giây) + CSV nhãn + **reasoning annotations** |
 | **Công cụ** | `yt-dlp`, `ffmpeg`, **Label Studio**, **Multi-agent pipeline** |
 
 ### 2.2. Phân chia game genre
@@ -917,46 +917,174 @@ Sau khi chọn được Strategy (kỳ vọng C), ablate encoder combinations:
 
 ## 6. Stage 2c — ASR → Text → Encoder
 
-Giữ nguyên như pipeline cũ.
+Stage 2c được nâng cấp đáng kể so với pipeline cũ: hỗ trợ 2 ASR backend (Whisper / PhoWhisper), optional BARTpho post-processing, và 2 text encoder có thể đổi qua config (`xlmr` | `phobert`). Toàn bộ lựa chọn được điều khiển qua `config.yaml` mà không cần sửa code.
 
-### 6.1. ASR — Whisper-large-v3
+### 6.1. ASR Backend — Chọn qua config
 
-```python
-from faster_whisper import WhisperModel
+**Vấn đề với Whisper thuần:**  
+Whisper-large-v3 đa ngôn ngữ có chất lượng không đồng đều trên tiếng Việt game streaming:
+- Clip 5 giây ngắn → Whisper kém tự tin hơn → tỷ lệ hallucination cao hơn
+- Game audio nhiều SFX → VAD cần tune cẩn thận
+- Code-switching Việt + Anh gaming slang → Whisper xử lý OK nhưng không tối ưu
 
-model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+**Hai backend được hỗ trợ:**
 
-def transcribe(audio_path):
-    segments, info = model.transcribe(
-        audio_path,
-        language="vi",
-        initial_prompt="Game streaming Vietnamese with English gaming terms like clutch, ace, GG, headshot, POG, ez",
-        vad_filter=True,
-        no_speech_threshold=0.6
-    )
-    return " ".join([seg.text.strip() for seg in segments])
+| Backend | Model | Ưu điểm | Nhược điểm |
+|---------|-------|---------|------------|
+| `whisper` | `openai/whisper-large-v3` | Code-switching Việt+Anh tốt, faster-whisper nhanh | Đa ngôn ngữ → tiếng Việt không specialized |
+| `phowhisper` | `vinai/PhoWhisper-large` | Fine-tuned trên tiếng Việt lớn, accent tốt hơn | Yếu hơn với English gaming terms |
+
+**Chọn backend trong `config.yaml`:**
+```yaml
+annotation:
+  asr:
+    backend: "whisper"   # "whisper" | "phowhisper"  ← đổi tại đây
+
+    whisper:
+      model_name: "openai/whisper-large-v3"
+      compute_type: "int8_float16"   # nhanh hơn float16, quality gần như nhau
+      language: "vi"
+      vad_filter: true
+      no_speech_threshold: 0.45     # 0.45 thay vì default 0.6 — phù hợp clip 5s
+      beam_size: 5
+      condition_on_previous_text: false  # tránh repetition loop
+
+    phowhisper:
+      model_name: "vinai/PhoWhisper-large"
+      compute_type: "float16"
+      chunk_length_s: 30
+      batch_size: 8
+      language: "vi"
 ```
 
-### 6.2. Text Encoder — XLM-RoBERTa-base
-
+**Gaming Initial Prompt** (chỉ áp dụng cho Whisper backend):
 ```python
-from transformers import AutoTokenizer, AutoModel
+_GAMING_INITIAL_PROMPT = (
+    "Đây là livestream game của streamer Việt Nam. "
+    "Streamer hay nói: GG, clutch, ace, headshot, MVP, noob, lag, buff, nerf, "
+    "rank, bot, carry, feed, gank, roam, farm, push, die, kill, team, "
+    "ơi trời, vãi, thôi rồi, ăn rồi, xong rồi, đi nào, vào nào."
+)
+```
+Prompt bias tokenizer về gaming domain, giảm lỗi nhận dạng gaming slang.
 
-tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
-text_encoder = AutoModel.from_pretrained("FacebookAI/xlm-roberta-base")
+**Factory `build_asr(cfg.asr)` trong `whisper_asr.py`:**
+```python
+from vie_gameemo.data.annotator.whisper_asr import build_asr
 
-def encode_text(transcript):
-    inputs = tokenizer(transcript, return_tensors="pt", padding=True, 
-                       truncation=True, max_length=128)
-    with torch.no_grad():
-        outputs = text_encoder(**inputs)
-    h_text = outputs.last_hidden_state[:, 0]  # CLS [1, 768]
-    return h_text
+asr_inst, bartpho_inst = build_asr(cfg.asr)
+asr_inst.load()
+transcript = asr_inst.transcribe(audio_path)
+asr_inst.unload()
 ```
 
-### 6.3. Thử nghiệm Stage 2c
+### 6.2. BARTpho Post-Processing (Tùy chọn)
 
-Giữ nguyên: Whisper-v3 vs PhoWhisper, XLM-R vs PhoBERT-v2, with/without prompt.
+Optional step sau ASR để fix lỗi word boundary, thiếu dấu, và từ dính nhau — vấn đề phổ biến với game audio nhiễu.
+
+```yaml
+annotation:
+  asr:
+    bartpho:
+      enabled: false             # true để bật (thêm ~3GB VRAM, ~5-10s/clip)
+      model_name: "vinai/bartpho-syllable-1_5"
+      max_length: 256
+      num_beams: 4
+      prefix: "Sửa lỗi chính tả và hoàn thiện câu: "
+```
+
+**Logic pipeline với BARTpho:**
+```python
+asr_inst, bartpho_inst = build_asr(cfg.asr)
+asr_inst.load()
+if bartpho_inst is not None:
+    bartpho_inst.load()
+
+transcript = asr_inst.transcribe(audio_path)
+if bartpho_inst is not None and transcript:
+    transcript = bartpho_inst.process(transcript)
+
+asr_inst.unload()
+if bartpho_inst is not None:
+    bartpho_inst.unload()
+```
+
+**Safety guard trong `BARTphoPostProcessor.process()`:** Nếu output ngắn hơn 50% input → giữ nguyên original (tránh generation failure).
+
+### 6.3. Text Encoder — Chọn qua config
+
+Output của cả hai encoder đều có shape `(B, 1, 768)` → **drop-in swap**, không ảnh hưởng fusion module.
+
+| Encoder | Model | Khi nào dùng |
+|---------|-------|-------------|
+| `xlmr` | `FacebookAI/xlm-roberta-base` | Default — code-switching Việt+Anh, gaming slang |
+| `phobert` | `vinai/phobert-base-v2` | Transcript chủ yếu tiếng Việt thuần (e.g. dùng PhoWhisper) |
+
+**Chọn encoder trong `config.yaml`:**
+```yaml
+text_encoder:
+  type: "xlmr"      # "xlmr" | "phobert"  ← đổi tại đây
+
+  xlmr:
+    model_name: "FacebookAI/xlm-roberta-base"
+    max_length: 128
+    pooling: "cls"   # "cls" | "mean"
+
+  phobert:
+    model_name: "vinai/phobert-base-v2"   # hoặc vinai/phobert-large (1024d)
+    max_length: 128
+    pooling: "cls"
+```
+
+**Factory `build_text_encoder(cfg.text_encoder)` trong `text_xlmr.py`:**
+```python
+from vie_gameemo.encoders.text_xlmr import build_text_encoder
+
+text_enc = build_text_encoder(cfg.text_encoder)
+text_enc.to(device)
+h_text = text_enc.encode(transcript)  # (1, 1, 768)
+```
+
+**XLMRTextEncoder** (`src/vie_gameemo/encoders/text_xlmr.py`):
+```python
+class XLMRTextEncoder(nn.Module):
+    def __init__(self, model_name="FacebookAI/xlm-roberta-base",
+                 max_length=128, pooling="cls", device="cuda"):
+        # AutoTokenizer + AutoModel, frozen
+        ...
+    def encode(self, text: str) -> Tensor:   # → (1, 1, 768)
+    def encode_batch(self, texts: list[str]) -> Tensor:  # → (B, 1, 768)
+```
+
+**PhoBERTTextEncoder** (`src/vie_gameemo/encoders/text_phobert.py`):
+```python
+class PhoBERTTextEncoder(nn.Module):
+    def __init__(self, model_name="vinai/phobert-base-v2",
+                 max_length=128, pooling="cls", device="cuda"):
+        # AutoTokenizer + AutoModel, frozen
+        ...
+    def encode(self, text: str) -> Tensor:   # → (1, 1, 768)  (same as XLM-R)
+    def encode_batch(self, texts: list[str]) -> Tensor:  # → (B, 1, 768)
+```
+
+### 6.4. Tổ hợp khuyến nghị (ASR + Text Encoder)
+
+| Kịch bản | ASR Backend | BARTpho | Text Encoder | Lý do |
+|----------|-------------|---------|--------------|-------|
+| **Default (code-switching)** | `whisper` | off | `xlmr` | Xử lý tốt Việt+Anh, nhanh |
+| **Vietnamese focus** | `phowhisper` | off | `phobert` | Cả hai specialized cho tiếng Việt |
+| **Maximum quality** | `phowhisper` | **on** | `phobert` | Tốt nhất chất lượng, chậm nhất |
+| **Fastest** | `whisper` (turbo) | off | `xlmr` | Dùng `whisper-large-v3-turbo` |
+
+### 6.5. Thử nghiệm Stage 2c
+
+| Ablation | Setup | Mục đích |
+|----------|-------|---------|
+| A | Whisper + XLM-R (baseline) | Pipeline cũ |
+| B | PhoWhisper + XLM-R | ASR quality trên tiếng Việt |
+| C | PhoWhisper + PhoBERT | Full Vietnamese specialization |
+| D | PhoWhisper + BARTpho + PhoBERT | Maximum pipeline |
+| E | No transcript (zeros) | Upper bound không có text |
 
 ---
 
