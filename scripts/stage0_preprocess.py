@@ -1,6 +1,6 @@
 """Stage 0/1: Demux videos into audio + frames.
 
-Extracts wav (16kHz mono) and frames (2fps) for each clip. Runs webcam
+Extracts wav (16kHz mono) and frames (4fps) for each clip. Runs webcam
 detection and caches the bbox per clip. Outputs cached under data/processed/.
 
 This script is part of the Stage 0 group (data prep) and runs INDEPENDENTLY

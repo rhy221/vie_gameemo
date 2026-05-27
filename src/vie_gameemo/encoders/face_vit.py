@@ -160,8 +160,18 @@ def _bgr_to_pil(bgr: np.ndarray) -> Image.Image:
 
 
 def _uniform_sample(frames: list, n: int) -> list:
-    """Uniformly sample n items from frames list."""
-    if len(frames) <= n:
+    """Uniformly sample exactly n items from frames list.
+
+    If len(frames) >= n: uniform subsample.
+    If len(frames) < n: subsample then pad with last frame to reach exactly n.
+    This guarantees the output always has length n, preventing shape mismatches
+    between has_face=True and has_face=False paths in the fusion module.
+    """
+    if not frames:
         return frames
-    indices = np.linspace(0, len(frames) - 1, n, dtype=int)
-    return [frames[i] for i in indices]
+    if len(frames) >= n:
+        indices = np.linspace(0, len(frames) - 1, n, dtype=int)
+        return [frames[i] for i in indices]
+    # Fewer frames than needed — pad by repeating the last frame
+    pad_n = n - len(frames)
+    return frames + [frames[-1]] * pad_n

@@ -190,7 +190,7 @@ python scripts/stage0_preprocess.py --config config.yaml --videos-dir data/raw_v
 
 Kết quả:
 - Audio (16kHz mono WAV): `data/processed/audios/`
-- Frames (2fps JPG): `data/processed/frames/`
+- Frames (4fps JPG): `data/processed/frames/`
 - Webcam region JSON: `data/processed/webcam_bboxes/`
 - Face crops: `data/processed/faces/`
 

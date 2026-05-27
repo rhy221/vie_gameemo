@@ -69,11 +69,11 @@ data:
     rpg: 0.10               # Genshin, Persona
     mobile: 0.10
 
-  # Clip splitting
+  # Clip splitting — annotation units are ~5s fixed segments
   clip:
-    duration_seconds: 25    # target length per clip
-    min_seconds: 15
-    max_seconds: 30
+    duration_seconds: 5     # target segment length (fixed 5s)
+    min_seconds: 4.5        # accept tail segments down to 4.5s
+    max_seconds: 5.5        # discard anything longer (shouldn't happen)
 
   # Train/val/test split (stratified by class + genre + code-switching)
   split:
@@ -97,7 +97,7 @@ preprocess:
     channels: 1            # mono
     format: "wav"
   frames:
-    fps: 2                 # extract at 2fps (biểu cảm chậm)
+    fps: 4                 # extract at 4fps for 5s clips → 20 frames (enough to sample 16)
     format: "jpg"
     quality: 90
 
@@ -143,15 +143,36 @@ annotation:
       - Năng lượng (yếu/trung/mạnh)
       - Có tiếng la, cười, im lặng không?
 
-  # ASR for transcript (Cls)
-  whisper_asr:
-    model_name: "openai/whisper-large-v3"
-    backend: "faster-whisper"
-    compute_type: "float16"
-    language: "vi"
-    initial_prompt: "Game streaming Vietnamese with English gaming terms like clutch, ace, GG, headshot, POG, ez"
-    vad_filter: true
-    no_speech_threshold: 0.6
+  # ASR for transcript — chọn backend tại annotation.asr.backend
+  asr:
+    backend: "whisper"          # "whisper" | "phowhisper"
+
+    # faster-whisper backend (openai/whisper-* models)
+    whisper:
+      model_name: "openai/whisper-large-v3"
+      compute_type: "int8_float16"   # faster than float16, near-identical quality
+      language: "vi"
+      vad_filter: true
+      no_speech_threshold: 0.45     # permissive for short 5s clips
+      beam_size: 5
+      condition_on_previous_text: false   # avoid repetition loops
+
+    # HuggingFace transformers pipeline (VinAI PhoWhisper — fine-tuned on Vietnamese)
+    phowhisper:
+      model_name: "vinai/PhoWhisper-large"   # medium/small for faster inference
+      compute_type: "float16"
+      chunk_length_s: 30
+      batch_size: 8
+      language: "vi"
+
+    # Optional BARTpho post-processing (disabled by default)
+    # Enables seq2seq denoising to fix word-boundary errors and diacritics
+    bartpho:
+      enabled: false
+      model_name: "vinai/bartpho-syllable-1_5"   # or bartpho-word
+      max_length: 256
+      num_beams: 4
+      prefix: "Sửa lỗi chính tả và hoàn thiện câu: "
 
   # Consolidator — merges all signals into final reasoning
   consolidator:
@@ -258,10 +279,20 @@ visual_encoder:
 # STAGE 2c: Text Encoder
 # -----------------------------------------------------------------------------
 text_encoder:
-  type: "xlmr"   # "xlmr" | "phobert" (for ablation)
-  model_name: "FacebookAI/xlm-roberta-base"
-  max_length: 128
-  pooling: "cls"   # "cls" | "mean"
+  type: "xlmr"      # "xlmr" | "phobert"  <-- đổi tại đây
+
+  # XLM-RoBERTa: tốt cho code-switching Việt + Anh (gaming slang)
+  xlmr:
+    model_name: "FacebookAI/xlm-roberta-base"
+    max_length: 128
+    pooling: "cls"   # "cls" | "mean"
+
+  # PhoBERT: tốt hơn cho tiếng Việt thuần, kém hơn khi có nhiều tiếng Anh
+  # Dùng khi ASR backend là phowhisper (transcript chủ yếu tiếng Việt)
+  phobert:
+    model_name: "vinai/phobert-base-v2"   # hoặc vinai/phobert-large (1024d)
+    max_length: 128
+    pooling: "cls"
 
 # -----------------------------------------------------------------------------
 # STAGE 3: Conv-Attention 4-Modality Fusion

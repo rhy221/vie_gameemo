@@ -56,11 +56,11 @@ vì nhãn không đáng tin cậy.
 Video thô (YouTube / file có sẵn)
         │
         ▼ CELL 7 — ffmpeg stream-copy
-Video clips 3–7 giây (data/clips/)
+Video clips ~5 giây (data/clips/)
         │
         ├──────────────────────────────────────────────────────────┐
         ▼ CELL 8 — tách audio + frames                            │
-  audio.wav (16kHz)   frames/ (2fps, JPEG)                        │
+  audio.wav (16kHz)   frames/ (4fps, JPEG)                        │
         │                     │                                    │
         │              ┌──────┘                                    │
         │              │                                           │

@@ -156,34 +156,32 @@ def _phase_local(
     clip_paths: list[Path],
     cfg: SimpleNamespace,
 ) -> list[dict]:
-    """Phase 1: lightweight ops (OpenFace, peak frame, Whisper).
+    """Phase 1: lightweight ops (OpenFace, peak frame, ASR).
 
     Args:
         clip_paths: Video files to process.
-        cfg: Annotation config.
+        cfg: Annotation config (cfg.asr.backend selects ASR backend).
 
     Returns:
         List of dicts with: peak_frame_idx, peak_frame_path, face_aus,
             peak_frame_aus, audio_path, transcript, webcam_bbox.
     """
-    # Load Whisper once for the whole batch
-    whisper = WhisperASR(
-        model_name=cfg.whisper_asr.model_name,
-        compute_type=cfg.whisper_asr.compute_type,
-        language=cfg.whisper_asr.language,
-        initial_prompt=cfg.whisper_asr.initial_prompt,
-        vad_filter=cfg.whisper_asr.vad_filter,
-        no_speech_threshold=cfg.whisper_asr.no_speech_threshold,
-    )
-    whisper.load()
+    from vie_gameemo.data.annotator.whisper_asr import build_asr
+
+    asr_inst, bartpho_inst = build_asr(cfg.asr)
+    asr_inst.load()
+    if bartpho_inst is not None:
+        bartpho_inst.load()
 
     results = []
     try:
         for clip_path in clip_paths:
-            r = _process_single_clip_local(clip_path, cfg, whisper)
+            r = _process_single_clip_local(clip_path, cfg, asr_inst, bartpho_inst)
             results.append(r)
     finally:
-        whisper.unload()
+        asr_inst.unload()
+        if bartpho_inst is not None:
+            bartpho_inst.unload()
 
     return results
 
@@ -191,14 +189,16 @@ def _phase_local(
 def _process_single_clip_local(
     clip_path: Path,
     cfg: SimpleNamespace,
-    whisper: WhisperASR,
+    asr_inst,
+    bartpho_inst,
 ) -> dict:
-    """Run local processing for one clip: OpenFace + peak frame + Whisper.
+    """Run local processing for one clip: OpenFace + peak frame + ASR.
 
     Args:
         clip_path: Video file.
         cfg: Annotation config.
-        whisper: Already-loaded WhisperASR instance.
+        asr_inst: Already-loaded ASR instance (WhisperASR or PhoWhisperASR).
+        bartpho_inst: Already-loaded BARTphoPostProcessor or None.
 
     Returns:
         Dict with processing results.
@@ -275,13 +275,15 @@ def _process_single_clip_local(
     except Exception as exc:
         logger.warning("Webcam detection failed for %s: %s", clip_path.name, exc)
 
-    # Whisper transcription
+    # ASR transcription + optional BARTpho post-processing
     transcript = ""
     if audio_path.exists():
         try:
-            transcript = whisper.transcribe(audio_path)
+            transcript = asr_inst.transcribe(audio_path)
+            if bartpho_inst is not None and transcript:
+                transcript = bartpho_inst.process(transcript)
         except Exception as exc:
-            logger.warning("Whisper failed for %s: %s", clip_path.name, exc)
+            logger.warning("ASR failed for %s: %s", clip_path.name, exc)
 
     return {
         "peak_frame_idx": peak_idx,

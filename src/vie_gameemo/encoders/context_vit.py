@@ -110,16 +110,19 @@ class ContextEncoder(nn.Module):
 
     @staticmethod
     def _sample_frames_uniform(frame_paths: list[Path], n: int) -> list[Path]:
-        """Uniformly subsample n frames from a list, preserving order.
+        """Uniformly subsample exactly n frames from a list, preserving order.
 
         Args:
             frame_paths: Sorted list of frame paths.
             n: Target count.
 
         Returns:
-            Subsampled list of length min(n, len(frame_paths)).
+            List of exactly n paths. If len < n, last frame is repeated.
         """
-        if len(frame_paths) <= n:
+        if not frame_paths:
             return frame_paths
-        indices = np.linspace(0, len(frame_paths) - 1, n, dtype=int)
-        return [frame_paths[i] for i in indices]
+        if len(frame_paths) >= n:
+            indices = np.linspace(0, len(frame_paths) - 1, n, dtype=int)
+            return [frame_paths[i] for i in indices]
+        pad_n = n - len(frame_paths)
+        return list(frame_paths) + [frame_paths[-1]] * pad_n

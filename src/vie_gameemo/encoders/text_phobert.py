@@ -1,35 +1,37 @@
-"""Text encoder using XLM-RoBERTa-base.
+"""Text encoder using VinAI PhoBERT.
 
-Multilingual encoder that handles Vietnamese + English gaming slang
-code-switching natively. PhoBERT is also a strong VN baseline, but XLM-R
-handles code-switching better out of the box.
+PhoBERT (vinai/phobert-base-v2) is RoBERTa pre-trained on 20GB Vietnamese text.
+Better than XLM-R for pure Vietnamese transcripts; weaker on English gaming
+slang code-switching. Use when the ASR backend produces mostly Vietnamese output
+(e.g. PhoWhisper) with few English terms.
 
-Output: token sequence (B, T, 768) where T depends on pooling.
+Output: (B, 1, 768) — identical shape to XLMRTextEncoder for drop-in swap.
 """
 
 import logging
 
 import torch
 from torch import Tensor, nn
-from transformers import AutoModel, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
 
-class XLMRTextEncoder(nn.Module):
-    """XLM-RoBERTa encoder for multilingual transcript embedding."""
+class PhoBERTTextEncoder(nn.Module):
+    """PhoBERT-base-v2 encoder for Vietnamese transcript embedding."""
 
     def __init__(
         self,
-        model_name: str = "FacebookAI/xlm-roberta-base",
+        model_name: str = "vinai/phobert-base-v2",
         max_length: int = 128,
         pooling: str = "cls",
         device: str | torch.device = "cuda",
     ) -> None:
-        """Initialize text encoder.
+        """Initialize PhoBERT text encoder.
 
         Args:
             model_name: HF model ID.
+                "vinai/phobert-base-v2" — 768d, recommended.
+                "vinai/phobert-large"   — 1024d (requires d_model change).
             max_length: Max token length (truncate longer).
             pooling: 'cls' (T=1) | 'mean' (T=1) | 'none' (T=seq_len).
             device: Torch device.
@@ -40,21 +42,24 @@ class XLMRTextEncoder(nn.Module):
         self.pooling = pooling
         self.device = torch.device(device)
 
-        logger.info("Loading XLM-RoBERTa: %s", model_name)
+        from transformers import AutoModel, AutoTokenizer
+
+        logger.info("Loading PhoBERT: %s", model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
         self.model = self.model.to(self.device)
-        logger.info("Text encoder loaded and frozen")
+        logger.info("PhoBERT encoder loaded and frozen")
 
     @torch.no_grad()
     def encode(self, text: str) -> Tensor:
         """Encode a single transcript.
 
         Args:
-            text: Transcript string (may contain Vietnamese + English mix).
+            text: Transcript string (Vietnamese preferred; English handled but
+                less accurately than XLM-R).
                 Empty string returns zero tensor.
 
         Returns:
@@ -113,46 +118,8 @@ class XLMRTextEncoder(nn.Module):
             (B, T, 768) pooled tensor.
         """
         if self.pooling == "cls":
-            return hidden[:, :1, :]  # CLS token → (B, 1, 768)
+            return hidden[:, :1, :]
         elif self.pooling == "mean":
-            return hidden.mean(dim=1, keepdim=True)  # (B, 1, 768)
+            return hidden.mean(dim=1, keepdim=True)
         else:
-            return hidden  # (B, seq_len, 768)
-
-
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
-
-def build_text_encoder(encoder_cfg) -> nn.Module:
-    """Build XLMRTextEncoder or PhoBERTTextEncoder from config.
-
-    Args:
-        encoder_cfg: cfg.text_encoder (SimpleNamespace).
-            .type:   "xlmr" | "phobert"
-            .xlmr:   sub-namespace with model_name, max_length, pooling
-            .phobert: sub-namespace with model_name, max_length, pooling
-
-    Returns:
-        Frozen encoder instance (not yet moved to target device).
-        Caller should call .to(device) after this function.
-    """
-    enc_type = getattr(encoder_cfg, "type", "xlmr")
-
-    if enc_type == "phobert":
-        from vie_gameemo.encoders.text_phobert import PhoBERTTextEncoder
-        ph = getattr(encoder_cfg, "phobert", encoder_cfg)
-        logger.info("Text encoder: PhoBERT (%s)", getattr(ph, "model_name", "vinai/phobert-base-v2"))
-        return PhoBERTTextEncoder(
-            model_name=getattr(ph, "model_name", "vinai/phobert-base-v2"),
-            max_length=getattr(ph, "max_length", 128),
-            pooling=getattr(ph, "pooling", "cls"),
-        )
-    else:
-        x = getattr(encoder_cfg, "xlmr", encoder_cfg)
-        logger.info("Text encoder: XLM-R (%s)", getattr(x, "model_name", "FacebookAI/xlm-roberta-base"))
-        return XLMRTextEncoder(
-            model_name=getattr(x, "model_name", "FacebookAI/xlm-roberta-base"),
-            max_length=getattr(x, "max_length", 128),
-            pooling=getattr(x, "pooling", "cls"),
-        )
+            return hidden
