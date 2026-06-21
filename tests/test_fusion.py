@@ -146,7 +146,7 @@ class TestFusionRegistry:
     ])
     def test_all_baselines_forward(self, fusion_type, batch_tensors):
         kwargs = {"d_model": D}
-        if fusion_type in ("conv_only", "attn_only", "conv_attention_4m"):
+        if fusion_type in ("conv_only", "conv_attention_4m"):
             kwargs["n_conv_blocks"] = 1
         model = get_fusion(fusion_type, **kwargs)
         out = model(

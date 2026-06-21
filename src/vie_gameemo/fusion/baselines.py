@@ -257,11 +257,19 @@ class ConvOnly(nn.Module):
         u_a, u_f, u_c, u_t = (self.mlp_audio(audio), self.mlp_face(face),
                                self.mlp_context(context), self.mlp_text(text))
         T = u_a.shape[1]
-        for u in (u_f, u_c, u_t):
-            if u.shape[1] != T:
-                u = F.interpolate(u.transpose(1, 2), T, mode="linear", align_corners=False).transpose(1, 2)
+        u_f = self._align(u_f, T)
+        u_c = self._align(u_c, T)
+        u_t = self._align(u_t, T)
         F_d = torch.cat([u_a, u_f, u_c, u_t], dim=-1)
         return self.conv_branch(F_d)
+
+    @staticmethod
+    def _align(x: Tensor, T: int) -> Tensor:
+        if x.shape[1] == T:
+            return x
+        if x.shape[1] == 1:
+            return x.expand(-1, T, -1)
+        return F.interpolate(x.transpose(1, 2), T, mode="linear", align_corners=False).transpose(1, 2)
 
 
 @register_fusion("attn_only")

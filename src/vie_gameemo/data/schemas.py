@@ -5,6 +5,7 @@ stages. Annotations are serialized as JSON on disk; these models provide
 validation and IDE autocomplete.
 """
 
+import json
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -192,7 +193,11 @@ class MultimodalFeatures(BaseModel):
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        data = self.model_dump(mode="python")
+        for k in ("h_audio_path", "h_face_path", "h_context_path", "h_text_path"):
+            data[k] = str(data[k])
+        data["extracted_at"] = data["extracted_at"].isoformat()
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     @classmethod
     def load(cls, path: Path) -> "MultimodalFeatures":
@@ -210,4 +215,5 @@ class MultimodalFeatures(BaseModel):
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Features metadata not found: {path}")
-        return cls.model_validate_json(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return cls.model_validate(data)
