@@ -363,9 +363,9 @@ classifier:
   loss:
     type: "focal"              # "ce" | "weighted_ce" | "focal"
     focal:
-      alpha: 1.0
-      gamma: 2.0
-    class_weights: "inverse_freq"   # "inverse_freq" | "effective_number" | "none"
+      alpha: 1.0               # overridden by class_weights when not "none"
+      gamma: 2.5               # 2.5 for imbalance ratio ~12.5:1 (neutral/disgusted)
+    class_weights: "effective_number"   # "inverse_freq" | "effective_number" | "none"
   sampler: "balanced_batch"         # "balanced_batch" | "none"
   augment:
     fused_mixup: false              # Manifold Mixup at fused-embedding level (off by default)
