@@ -162,7 +162,8 @@ class LLM3VLMEndToEnd(BaseLLMReasoner):
 
         messages = [{"role": "user", "content": content}]
         text_input = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
         )
 
         inputs = self.processor(

@@ -54,8 +54,8 @@ def _config_hash(cfg) -> str:
         "audio_tokens": cfg.audio_encoder.target_tokens,
         "face": cfg.visual_encoder.face_encoder.model_name,
         "context": cfg.visual_encoder.context_encoder.model_name,
-        "text": cfg.text_encoder.model_name,
-        "text_pool": cfg.text_encoder.pooling,
+        "text": getattr(cfg.text_encoder, "model", getattr(cfg.text_encoder, "model_name", "unknown")),
+        "text_backend": getattr(cfg.text_encoder, "backend", getattr(cfg.text_encoder, "type", "xlmr")),
     }
     return hashlib.md5(json.dumps(relevant, sort_keys=True).encode()).hexdigest()[:12]
 

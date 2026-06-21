@@ -73,15 +73,18 @@ def main() -> int:
     logger.info("Stage: %s | Fusion: %s | LLM setup: %s",
                 args.stage, cfg.fusion.type, cfg.llm.active_setup)
 
+    split_manifest = Path(getattr(cfg.paths, "split_manifest", "data/splits.json"))
     train_ds = VieGameEmoDataset(
         annotations_dir=Path(cfg.paths.annotations),
         features_dir=Path(cfg.paths.features),
         split="train",
+        split_manifest=split_manifest if split_manifest.exists() else None,
     )
     val_ds = VieGameEmoDataset(
         annotations_dir=Path(cfg.paths.annotations),
         features_dir=Path(cfg.paths.features),
         split="val",
+        split_manifest=split_manifest if split_manifest.exists() else None,
     )
     train_loader = DataLoader(
         train_ds,

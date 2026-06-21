@@ -162,7 +162,7 @@ def _generate_judge(judge: dict, prompt: str, max_new_tokens: int = 128) -> str:
     tokenizer = judge["tokenizer"]
     model = judge["model"]
     messages = [{"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
     with torch.no_grad():
         out = model.generate(

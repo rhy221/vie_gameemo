@@ -195,7 +195,8 @@ class Consolidator:
 
         messages = [{"role": "user", "content": prompt}]
         text_input = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
         )
         inputs = self.tokenizer(text_input, return_tensors="pt").to(self.model.device)
 

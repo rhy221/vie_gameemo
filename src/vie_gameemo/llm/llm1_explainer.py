@@ -144,7 +144,8 @@ class LLM1Explainer(BaseLLMReasoner):
 
         messages = [{"role": "user", "content": prompt}]
         text_input = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
         )
         inputs = self.tokenizer(text_input, return_tensors="pt").to(self.model.device)
 
@@ -164,6 +165,10 @@ class LLM1Explainer(BaseLLMReasoner):
     def parse_output(raw: str, fallback_label: str = "neutral") -> tuple[str, str, bool]:
         """Parse <think>...</think><answer>...</answer> from raw text.
 
+        Qwen3 may prepend its own <think>...</think> block (thinking mode)
+        before the actual response. We take the LAST <think> block to skip
+        the model's internal reasoning, and always extract <answer>.
+
         Args:
             raw: Generated text.
             fallback_label: Label to use if <answer> tag missing.
@@ -171,9 +176,9 @@ class LLM1Explainer(BaseLLMReasoner):
         Returns:
             Tuple of (reasoning, answer, format_valid).
         """
-        think_match = re.search(r"<think>(.*?)</think>", raw, re.DOTALL)
+        think_matches = re.findall(r"<think>(.*?)</think>", raw, re.DOTALL)
         answer_match = re.search(r"<answer>(.*?)</answer>", raw, re.DOTALL)
-        reasoning = think_match.group(1).strip() if think_match else raw.strip()
+        reasoning = think_matches[-1].strip() if think_matches else raw.strip()
         answer = answer_match.group(1).strip() if answer_match else fallback_label
-        format_valid = bool(think_match and answer_match)
+        format_valid = bool(think_matches and answer_match)
         return reasoning, answer, format_valid
