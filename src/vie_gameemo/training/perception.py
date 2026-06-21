@@ -52,7 +52,7 @@ def train_perception(
     """
     from vie_gameemo.classifiers.mlp import EmotionClassifier
     from vie_gameemo.fusion import get_fusion
-    from vie_gameemo.training.losses import FocalLoss
+    from vie_gameemo.training.losses import FocalLoss, make_class_weights
 
     pcfg = cfg.training.perception
     fcfg = cfg.fusion
@@ -76,9 +76,20 @@ def train_perception(
         dropout=ccfg.dropout,
     ).to(device)
 
+    # Class weights for focal/weighted_ce
+    loss_cfg = ccfg.loss
+    loss_type = getattr(loss_cfg, "type", "focal")
+    class_weight_method = getattr(loss_cfg, "class_weights", "none")
+    alpha = getattr(loss_cfg.focal, "alpha", 1.0)
+
+    if class_weight_method != "none":
+        all_train_labels = [item["label"] for item in train_loader.dataset.items]
+        alpha = make_class_weights(all_train_labels, ccfg.n_classes, method=class_weight_method)
+        logger.info("Using %s class weights: %s", class_weight_method, alpha)
+
     criterion = FocalLoss(
-        gamma=ccfg.loss.focal.gamma,
-        alpha=ccfg.loss.focal.alpha,
+        gamma=getattr(loss_cfg.focal, "gamma", 2.0),
+        alpha=alpha,
     )
 
     params = list(fusion.parameters()) + list(classifier.parameters())
@@ -173,9 +184,13 @@ def train_perception(
         )
         macro_f1 = val_metrics["macro_f1"]
         logger.info(
-            "Epoch %d/%d | loss=%.4f | val_acc=%.4f | val_macro_f1=%.4f",
-            epoch + 1, pcfg.epochs, avg_loss, val_metrics["accuracy"], macro_f1,
+            "Epoch %d/%d | loss=%.4f | val_macro_f1=%.4f | val_uar=%.4f",
+            epoch + 1, pcfg.epochs, avg_loss, macro_f1, val_metrics["uar"],
         )
+        if "per_class_f1" in val_metrics:
+            for cls_name, f1_val in val_metrics["per_class_f1"].items():
+                logger.info("  %s: F1=%.4f recall=%.4f",
+                            cls_name, f1_val, val_metrics["per_class_recall"].get(cls_name, 0))
 
         if macro_f1 > state.best_metric:
             state.best_metric = macro_f1
@@ -236,19 +251,28 @@ def evaluate(
             all_preds.extend(preds.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
+    from vie_gameemo.training.losses import per_class_metrics as compute_per_class
+    from vie_gameemo.data.schemas import EmotionLabel
+
     accuracy = sum(p == l for p, l in zip(all_preds, all_labels)) / max(1, len(all_labels))
     macro_f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
     weighted_f1 = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
 
-    # UAR = unweighted average recall = macro recall
     from sklearn.metrics import recall_score
     uar = recall_score(all_labels, all_preds, average="macro", zero_division=0)
+
+    class_names = [e.value for e in EmotionLabel]
+    detailed = compute_per_class(all_preds, all_labels, n_classes, class_names)
 
     return {
         "accuracy": float(accuracy),
         "macro_f1": float(macro_f1),
         "weighted_f1": float(weighted_f1),
         "uar": float(uar),
+        "per_class_f1": detailed["per_class_f1"],
+        "per_class_recall": detailed["per_class_recall"],
+        "per_class_precision": detailed["per_class_precision"],
+        "confusion_matrix": detailed["confusion_matrix"],
     }
 
 

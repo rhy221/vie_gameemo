@@ -15,6 +15,8 @@
 > 4. Multi-agent annotation pipeline 100% open-source cho tiếng Việt
 > 5. Curriculum learning Perception→Cognition cho VN emotion domain
 > 6. Benchmark dataset livestream game VN đầu tiên với 4 modality + reasoning annotation
+> 7. **(v2) Dataset song ngữ VI+EN** với CafeBERT encoder, metadata-first ASR routing, iterative multilabel stratification
+> 8. **(v2) Language-adversarial head (GRL)** — ép h_text language-invariant, novelty contribution chính
 
 ---
 
@@ -127,7 +129,7 @@
 | **1. Demuxing** | MP4 | audio.wav + frames | ffmpeg | ✅ |
 | **2a. Audio→Spec→Enc** | wav 16kHz | h_audio (768d) | librosa + **AST** | ✅ |
 | **2b. Visual Dual-Path** | frames | h_face + h_ctx (2×768d) | **Webcam detect + ViT-FER + ViT-ImageNet** | ✅ |
-| **2c. ASR→Text→Enc** | wav | h_text (768d) | **Whisper/PhoWhisper + BARTpho(opt) + XLM-R/PhoBERT** | ✅ |
+| **2c. ASR→Text→Enc (v2)** | wav | h_text (768/1024d) | **Whisper bilingual routing + BARTpho(VI) + fastText LID + CafeBERT + adversarial head(opt)** | ✅ |
 | **3. Pre-Fusion** | 4 × 768d | u_fusion (768d) | **Conv-Attention module** | ✅ |
 | **4. Classifier** | u_fusion | label probs | MLP 2-layer | ✅ |
 | **5. LLM** | label + features | Giải thích VN | **Qwen2.5-7B** (4 setup) | ✅ |
@@ -914,176 +916,162 @@ Sau khi chọn được Strategy (kỳ vọng C), ablate encoder combinations:
 
 ---
 
-## 6. Stage 2c — ASR → Text → Encoder
+## 6. Stage 2c — ASR → Text → Encoder (BILINGUAL VI+EN v2)
 
-Stage 2c được nâng cấp đáng kể so với pipeline cũ: hỗ trợ 2 ASR backend (Whisper / PhoWhisper), optional BARTpho post-processing, và 2 text encoder có thể đổi qua config (`xlmr` | `phobert`). Toàn bộ lựa chọn được điều khiển qua `config.yaml` mà không cần sửa code.
+> **v2 Update:** Stage 2c nay hỗ trợ **dataset song ngữ (EN ≈ 50–60%, VI ≈ 40–50%)**. EN được thêm để bù class hiếm + genre ít video Việt (horror, RPG). Chỉ text modality bị ảnh hưởng bởi ngôn ngữ — audio/face/context language-agnostic.
 
-### 6.1. ASR Backend — Chọn qua config
+### 6.0. Nguyên tắc thiết kế song ngữ
 
-**Vấn đề với Whisper thuần:**  
-Whisper-large-v3 đa ngôn ngữ có chất lượng không đồng đều trên tiếng Việt game streaming:
-- Clip 5 giây ngắn → Whisper kém tự tin hơn → tỷ lệ hallucination cao hơn
-- Game audio nhiều SFX → VAD cần tune cẩn thận
-- Code-switching Việt + Anh gaming slang → Whisper xử lý OK nhưng không tối ưu
+1. **Metadata-first routing:** biết ngôn ngữ ở cấp VIDEO (field `source_language`), không đoán ở cấp clip 5s.
+2. **Không dịch ở nhánh classifier production.** Encoder multilingual xử lý trực tiếp.
+3. **CafeBERT default** (XLM-R-large + pretrain VI) — bảo vệ phe VI thiểu số.
+4. **Language-adversarial head** (GRL) — ép `h_text` không mã hóa ngôn ngữ → giảm phân mảnh.
+5. **LLM Reasoner** hiểu transcript EN trực tiếp, xuất reasoning **100% tiếng Việt**.
 
-**Hai backend được hỗ trợ:**
+### 6.1. ASR Routing — Metadata-first + Per-language Config
 
-| Backend | Model | Ưu điểm | Nhược điểm |
-|---------|-------|---------|------------|
-| `whisper` | `openai/whisper-large-v3` | Code-switching Việt+Anh tốt, faster-whisper nhanh | Đa ngôn ngữ → tiếng Việt không specialized |
-| `phowhisper` | `vinai/PhoWhisper-large` | Fine-tuned trên tiếng Việt lớn, accent tốt hơn | Yếu hơn với English gaming terms |
-
-**Chọn backend trong `config.yaml`:**
+**Config mới (`config.yaml`):**
 ```yaml
 annotation:
   asr:
-    backend: "whisper"   # "whisper" | "phowhisper"  ← đổi tại đây
+    backend: "whisper"              # whisper | phowhisper
+    language_routing: "metadata"    # metadata (default) | auto | force
+    force_language: "vi"
+    detect_for_validation: true     # luôn chạy detect để audit, KHÔNG ép kết quả
+    lang_prob_threshold: 0.6        # chỉ dùng khi routing == auto
+
+    text_lid:
+      backend: "fasttext"           # lid.176 (offline, <1MB)
+      model: "lid.176.ftz"
 
     whisper:
       model_name: "openai/whisper-large-v3"
-      compute_type: "int8_float16"   # nhanh hơn float16, quality gần như nhau
-      language: "vi"
+      compute_type: "int8_float16"
       vad_filter: true
-      no_speech_threshold: 0.45     # 0.45 thay vì default 0.6 — phù hợp clip 5s
-      beam_size: 5
-      condition_on_previous_text: false  # tránh repetition loop
+      vi:
+        language: "vi"
+        initial_prompt: "<gaming terms VI>"
+        post_process: "bartpho"
+      en:
+        language: "en"
+        initial_prompt: "<gaming terms EN>"
+        post_process: "none"
 
     phowhisper:
       model_name: "vinai/PhoWhisper-large"
-      compute_type: "float16"
-      chunk_length_s: 30
-      batch_size: 8
-      language: "vi"
+      vi:
+        language: "vi"
+        post_process: "bartpho"
+      # không có "en" → clip EN fallback sang whisper
 ```
 
-**Gaming Initial Prompt** (chỉ áp dụng cho Whisper backend):
+**Routing logic:**
+- `"metadata"` (default): dùng `whisper[source_language]` — language + prompt + post_process theo ngôn ngữ gốc video.
+- `"auto"`: bỏ `language` cho Whisper tự detect; dưới `lang_prob_threshold` → fallback an toàn `vi`.
+- `"force"`: ép `force_language`.
+
+**PhoWhisper + EN:** PhoWhisper không hỗ trợ EN → tự động fallback sang WhisperASR cho clip EN. Không crash.
+
+### 6.2. FastText LID Cross-check
+
+Sau khi transcribe, **fastText lid.176** chạy trên transcript output → `text_detected_language` + `language_detect_confidence`. Nếu khác `source_language` → cờ `language_mismatch` (để review code-switch).
+
 ```python
-_GAMING_INITIAL_PROMPT = (
-    "Đây là livestream game của streamer Việt Nam. "
-    "Streamer hay nói: GG, clutch, ace, headshot, MVP, noob, lag, buff, nerf, "
-    "rank, bot, carry, feed, gank, roam, farm, push, die, kill, team, "
-    "ơi trời, vãi, thôi rồi, ăn rồi, xong rồi, đi nào, vào nào."
-)
-```
-Prompt bias tokenizer về gaming domain, giảm lỗi nhận dạng gaming slang.
+from vie_gameemo.data.annotator.whisper_asr import transcribe_clip
 
-**Factory `build_asr(cfg.asr)` trong `whisper_asr.py`:**
-```python
-from vie_gameemo.data.annotator.whisper_asr import build_asr
-
-asr_inst, bartpho_inst = build_asr(cfg.asr)
-asr_inst.load()
-transcript = asr_inst.transcribe(audio_path)
-asr_inst.unload()
+result = transcribe_clip(asr, bartpho, audio_path, source_language="en", asr_cfg=cfg.asr)
+# result.text                     → "Oh my god! What a clutch!"
+# result.asr_detected_language    → "en"
+# result.text_detected_language   → "en" (fastText)
+# result.language_detect_confidence → 0.95
+# result.language_mismatch        → False
 ```
 
-### 6.2. BARTpho Post-Processing (Tùy chọn)
+### 6.3. BARTpho Post-Processing (Chỉ cho clip VI)
 
-Optional step sau ASR để fix lỗi word boundary, thiếu dấu, và từ dính nhau — vấn đề phổ biến với game audio nhiễu.
+BARTpho **chỉ chạy khi `post_process=="bartpho"`** (clip VI). Clip EN bỏ qua — không áp dụng Vietnamese text cleanup lên English transcript.
 
-```yaml
-annotation:
-  asr:
-    bartpho:
-      enabled: false             # true để bật (thêm ~3GB VRAM, ~5-10s/clip)
-      model_name: "vinai/bartpho-syllable-1_5"
-      max_length: 256
-      num_beams: 4
-      prefix: "Sửa lỗi chính tả và hoàn thiện câu: "
-```
+### 6.4. Text Encoder — CafeBERT Default (6 backends)
 
-**Logic pipeline với BARTpho:**
-```python
-asr_inst, bartpho_inst = build_asr(cfg.asr)
-asr_inst.load()
-if bartpho_inst is not None:
-    bartpho_inst.load()
+**v2 thay đổi:** CafeBERT (XLM-R-large + pretrain tiếng Việt, SOTA VLUE gồm VSMEC) là default. Vẫn đa ngôn ngữ nên encode EN tốt.
 
-transcript = asr_inst.transcribe(audio_path)
-if bartpho_inst is not None and transcript:
-    transcript = bartpho_inst.process(transcript)
-
-asr_inst.unload()
-if bartpho_inst is not None:
-    bartpho_inst.unload()
-```
-
-**Safety guard trong `BARTphoPostProcessor.process()`:** Nếu output ngắn hơn 50% input → giữ nguyên original (tránh generation failure).
-
-### 6.3. Text Encoder — Chọn qua config
-
-Output của cả hai encoder đều có shape `(B, 1, 768)` → **drop-in swap**, không ảnh hưởng fusion module.
-
-| Encoder | Model | Khi nào dùng |
-|---------|-------|-------------|
-| `xlmr` | `FacebookAI/xlm-roberta-base` | Default — code-switching Việt+Anh, gaming slang |
-| `phobert` | `vinai/phobert-base-v2` | Transcript chủ yếu tiếng Việt thuần (e.g. dùng PhoWhisper) |
-
-**Chọn encoder trong `config.yaml`:**
 ```yaml
 text_encoder:
-  type: "xlmr"      # "xlmr" | "phobert"  ← đổi tại đây
+  backend: "cafebert"   # cafebert | xlmr-large | xlmr-base | xlm-emo | mE5-frozen | phobert
+  model: "uitnlp/CafeBERT"
+  warm_start: "none"     # "MilaNLProc/xlm-emo-t" để test transfer emotion-pretrain
+  freeze: false          # true cho mE5-frozen baseline (rẻ compute)
+  max_length: 128
+  pooling: "cls"
 
-  xlmr:
-    model_name: "FacebookAI/xlm-roberta-base"
-    max_length: 128
-    pooling: "cls"   # "cls" | "mean"
-
-  phobert:
-    model_name: "vinai/phobert-base-v2"   # hoặc vinai/phobert-large (1024d)
-    max_length: 128
-    pooling: "cls"
+  language_adversarial:
+    enabled: false       # bật theo quyết định ablation
+    lambda_grl: 0.1
 ```
 
-**Factory `build_text_encoder(cfg.text_encoder)` trong `text_xlmr.py`:**
+| Backend | Model | D | Use case |
+|---------|-------|---|----------|
+| **`cafebert`** (default) | `uitnlp/CafeBERT` | 1024 | XLM-R-large + pretrain VI; bảo vệ phe VI thiểu số |
+| `xlmr-large` | `FacebookAI/xlm-roberta-large` | 1024 | Multilingual baseline large |
+| `xlmr-base` | `FacebookAI/xlm-roberta-base` | 768 | Fallback nếu T4 OOM |
+| `xlm-emo` | `MilaNLProc/xlm-emo-t` | 768 | Warm-start emotion-pretrain |
+| `mE5-frozen` | `intfloat/multilingual-e5-large` | 1024 | Frozen + L2 norm, rẻ compute |
+| `phobert` | `vinai/phobert-base-v2` | 768 | VI-only, chỉ cho ablation translated |
+
+**VRAM caveat (T4 16GB):** CafeBERT ~560M params + 3 modality encoder + fusion → đo VRAM thực tế. Nếu OOM: gradient checkpointing / batch nhỏ / freeze tầng dưới, hoặc fallback `xlmr-base`.
+
+### 6.5. Language-Adversarial Head (NOVELTY — bật/tắt qua config)
+
+**Thay thế ý "cho fusion biết source_language" (reinforce confound).** Hướng đúng: ép `h_text` **không** dự đoán được ngôn ngữ.
+
+```
+h_text → [GRL(λ)] → MLP(D→128→2) → language prediction (vi/en)
+```
+
+- Gradient Reversal Layer (GRL) đảo dấu gradient → encoder học tạo embedding "đánh lừa" discriminator.
+- Loss: `L = L_emotion + λ_grl * L_lang_adv`
+- **Mặc định TẮT.** Bật nếu ablation A2 cho thấy VI test subset thấp hơn A1 >1–2 macro-F1.
+- File: `src/vie_gameemo/encoders/language_adversarial.py`
+
+### 6.6. Schema cập nhật — Trường ngôn ngữ
+
 ```python
-from vie_gameemo.encoders.text_xlmr import build_text_encoder
-
-text_enc = build_text_encoder(cfg.text_encoder)
-text_enc.to(device)
-h_text = text_enc.encode(transcript)  # (1, 1, 768)
+class Annotation(BaseModel):
+    ...
+    source_language: Literal["vi", "en"] = "vi"      # ground-truth cấp video
+    asr_detected_language: str | None = None          # Whisper info.language
+    text_detected_language: str | None = None          # fastText lid.176
+    language_detect_confidence: float | None = None    # prob của fastText
+    language_mismatch: bool = False                    # bất kỳ detector ≠ source_language
 ```
 
-**XLMRTextEncoder** (`src/vie_gameemo/encoders/text_xlmr.py`):
-```python
-class XLMRTextEncoder(nn.Module):
-    def __init__(self, model_name="FacebookAI/xlm-roberta-base",
-                 max_length=128, pooling="cls", device="cuda"):
-        # AutoTokenizer + AutoModel, frozen
-        ...
-    def encode(self, text: str) -> Tensor:   # → (1, 1, 768)
-    def encode_batch(self, texts: list[str]) -> Tensor:  # → (B, 1, 768)
-```
+Default `"vi"` → clip cũ load không lỗi (backward compatible).
 
-**PhoBERTTextEncoder** (`src/vie_gameemo/encoders/text_phobert.py`):
-```python
-class PhoBERTTextEncoder(nn.Module):
-    def __init__(self, model_name="vinai/phobert-base-v2",
-                 max_length=128, pooling="cls", device="cuda"):
-        # AutoTokenizer + AutoModel, frozen
-        ...
-    def encode(self, text: str) -> Tensor:   # → (1, 1, 768)  (same as XLM-R)
-    def encode_batch(self, texts: list[str]) -> Tensor:  # → (B, 1, 768)
-```
+### 6.7. Tổ hợp khuyến nghị (v2)
 
-### 6.4. Tổ hợp khuyến nghị (ASR + Text Encoder)
+| Kịch bản | ASR | Encoder | Adversarial | Ghi chú |
+|----------|-----|---------|-------------|---------|
+| **Default (mixed VI+EN)** | whisper metadata-routing | CafeBERT | Off | Đề xuất |
+| **Default + adversarial** | whisper metadata-routing | CafeBERT | **On** | Nếu ablation cần |
+| **VI-only baseline (A1)** | whisper/phowhisper | CafeBERT/PhoBERT | Off | Chỉ dùng clip VI |
+| **Translate EN→VI (A4)** | whisper | PhoBERT | Off | NLLB-200 dịch trước |
+| **mE5 frozen (rẻ)** | whisper | mE5-frozen | Off | Không cần fine-tune |
 
-| Kịch bản | ASR Backend | BARTpho | Text Encoder | Lý do |
-|----------|-------------|---------|--------------|-------|
-| **Default (code-switching)** | `whisper` | off | `xlmr` | Xử lý tốt Việt+Anh, nhanh |
-| **Vietnamese focus** | `phowhisper` | off | `phobert` | Cả hai specialized cho tiếng Việt |
-| **Maximum quality** | `phowhisper` | **on** | `phobert` | Tốt nhất chất lượng, chậm nhất |
-| **Fastest** | `whisper` (turbo) | off | `xlmr` | Dùng `whisper-large-v3-turbo` |
+### 6.8. Thử nghiệm Stage 2c (v2 — Language Ablation A1–A5)
 
-### 6.5. Thử nghiệm Stage 2c
+| Variant | Mô tả | Encoder | Data | Mục đích |
+|---------|--------|---------|------|----------|
+| **A1** | VI-only | CafeBERT/PhoBERT | Chỉ clip VI | Baseline không EN |
+| **A2** | Mixed multilingual, no-translate | CafeBERT | Tất cả | **Đề xuất production** |
+| **A3** | Mixed + adversarial head | CafeBERT + GRL | Tất cả | **Novelty — giảm fragmentation** |
+| **A4** | Translate EN→VI (NLLB-200) | PhoBERT | Tất cả dịch sang VI | So sánh vs A2 |
+| **A5** | Translate all→EN | xlmr-base | Tất cả dịch sang EN | English-only baseline |
 
-| Ablation | Setup | Mục đích |
-|----------|-------|---------|
-| A | Whisper + XLM-R (baseline) | Pipeline cũ |
-| B | PhoWhisper + XLM-R | ASR quality trên tiếng Việt |
-| C | PhoWhisper + PhoBERT | Full Vietnamese specialization |
-| D | PhoWhisper + BARTpho + PhoBERT | Maximum pipeline |
-| E | No transcript (zeros) | Upper bound không có text |
+**Metrics bổ sung:**
+- **B.** F1 tách riêng **test-VI** và **test-EN** (chứng minh phe VI không bị bóp)
+- **C.** Per-class F1 cho disgusted/fear/shocked qua A1–A5
+- **D.** Modality ablation: text có giúp hơn A+V không? Khác nhau theo ngôn ngữ?
+- **E.** Fragmentation diagnostic: t-SNE/UMAP `h_text` tô màu theo ngôn ngữ + silhouette + language classifier accuracy
 
 ---
 
@@ -1326,7 +1314,7 @@ Giữ nguyên như pipeline cũ.
 
 ```python
 class EmotionClassifier(nn.Module):
-    def __init__(self, dim=768, hidden=256, n_classes=9, dropout=0.3):
+    def __init__(self, dim=768, hidden=256, n_classes=8, dropout=0.3):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden),
@@ -1341,7 +1329,9 @@ class EmotionClassifier(nn.Module):
         return self.net(h)
 ```
 
-**Loss:** Focal Loss cho class imbalance.
+**Loss:** Focal Loss (γ=2) + inverse-freq class weights. Per-class recall + confusion matrix được log (không headline accuracy).
+
+**Augmentation (v2):** Fused-embedding Mixup cho class hiếm — tắt by default, bật qua `classifier.augment.fused_mixup: true`.
 
 ---
 
@@ -1894,7 +1884,11 @@ checkpoint_stage2 = {
 | **Spatial pooling** | 2b | 1×1/2×2/4×4/8×8 | Best granularity |
 | **Face crop margin** | 2b | 0.1/0.2/0.3 | Bao nhiêu context quanh face |
 | **ASR** | 2c | Whisper-v3 vs PhoWhisper | Code-switching |
-| **Text encoder** | 2c | XLM-R vs PhoBERT-v2 | Encoder phù hợp |
+| **Text encoder** | 2c | CafeBERT vs XLM-R-base vs PhoBERT | Encoder phù hợp cho bilingual |
+| **Language handling (KEY v2)** | 2c | A1 VI-only / A2 Mixed / **A3 Mixed+adversarial** / A4 Translate→VI / A5 Translate→EN | **Bilingual novelty** |
+| **Language-adversarial head** | 2c | On vs Off (λ=0.05/0.1/0.2) | Giảm embedding fragmentation |
+| **Per-language eval (B)** | 2c | F1 trên test-VI vs test-EN | Phe VI có bị bóp không |
+| **Fragmentation diagnostic (E)** | 2c | t-SNE h_text trước/sau fine-tune/adversarial | Quantify language separation |
 | **Pre-fusion** | 3 | Late/Early/MULT/Q-Former/Conv/Attn/**Conv-Attn 4M** | **Validate Conv-Attn best với 4 modality** |
 | **Modality dropout** | 3 | p=0 vs 0.1 vs 0.3 | Robustness, no-facecam handling |
 | **Attention weight visualization** | 3 | Plot weights theo timeline + genre | Interpretability: model focus đâu khi nào |
@@ -1934,17 +1928,22 @@ checkpoint_stage2 = {
 - Paired t-test khi so sánh 2 setup trên cùng test set
 - Bootstrap confidence intervals cho human eval
 
-### 12.4. Split Dataset
+### 12.4. Split Dataset (v2 — Iterative Multilabel Stratification)
 
 ```
-Total: 600 clip
-Train:      70% (420 clip)
-Validation: 15% (90 clip)
-Test (ID):  10% (60 clip)
-Test (OOD): 5% (30 clip)  ← streamer mới, không thấy ở train
+Total: ~3,245 clip × 5s (EN ≈ 50–60%, VI ≈ 40–50%)
+Train:      70%
+Validation: 15%
+Test (ID):  10%
+Test (OOD): 5%  ← streamer mới, không thấy ở train
 
-Stratified theo: class, genre, code-switching status
+Method: iterative_multilabel (trent-b MultilabelStratifiedKFold)
+Stratify on: (emotion, source_language, genre, codeswitch_bucket)
 ```
+
+**Report phân bố** sau split: bảng `emotion × source_language` cho từng split → đo trực tiếp mức confound R2 (tỷ lệ EN bên trong từng class).
+
+**Class hiếm (disgusted ~0.5%):** dùng k-fold CV riêng vì test đơn ~16 clip quá nhiễu. Đảm bảo mỗi cell `(rare-class × language)` có số tối thiểu.
 
 ---
 
@@ -2249,7 +2248,7 @@ Với pipeline này, có thể submit tới:
 
 ## Kết Luận
 
-Pipeline Full Upgrade này tích hợp **7 hướng cải tiến** (6 từ paper + 1 domain adaptation):
+Pipeline Full Upgrade v2 này tích hợp **9 hướng cải tiến** (6 từ paper + 1 domain adaptation + 2 bilingual v2):
 
 1. ✅ **Dual-path visual encoding** (DOMAIN-SPECIFIC) — adapt cho livestream gaming, không follow paper máy móc
 2. ✅ **Conv-Attention pre-fusion 4-modality** (thay MULT) — +1.5-2.0% accuracy
@@ -2258,6 +2257,8 @@ Pipeline Full Upgrade này tích hợp **7 hướng cải tiến** (6 từ paper
 5. ✅ **Multi-agent annotation** (open-source) — giảm 70% effort, có reasoning data
 6. ✅ **Encoder pairing ablation** — find best combination
 7. ✅ **Granularity ablation** (audio tokens, frames, spatial pooling)
+8. ✅ **Bilingual dataset VI+EN** — CafeBERT encoder, metadata-first routing, fastText cross-check, iterative multilabel stratification
+9. ✅ **Language-adversarial head (GRL)** — NOVELTY: ép h_text language-invariant, giảm phân mảnh embedding + chặn confound ngôn ngữ↔nhãn
 
 **Phương án compute linh hoạt:**
 - Có A100 → full Qwen2.5-7B cho RLVR, Qwen2.5-72B cho annotation

@@ -114,6 +114,7 @@ class LLM1Explainer(BaseLLMReasoner):
             rms_db=evidence.get("rms_db", 0),
             shout=evidence.get("shout", False),
             transcript=evidence.get("transcript", ""),
+            source_language=evidence.get("source_language", "vi"),
         )
 
         raw = self._generate(prompt)

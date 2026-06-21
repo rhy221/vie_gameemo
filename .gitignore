@@ -14,17 +14,9 @@ venv/
 env/
 ENV/
 
-# Data (large files — only track .gitkeep)
-data/raw_videos/*
-!data/raw_videos/.gitkeep
-data/processed/**/*
-!data/processed/**/.gitkeep
-data/features/*
-!data/features/.gitkeep
-data/cache/*
-!data/cache/.gitkeep
-data/annotations/*.json
-!data/annotations/.gitkeep
+# Data (entire folder — dataset managed externally)
+data/*
+!data/.gitkeep
 
 # Outputs
 outputs/checkpoints/*

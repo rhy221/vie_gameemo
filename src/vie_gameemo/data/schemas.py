@@ -8,6 +8,7 @@ validation and IDE autocomplete.
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, field_validator, model_validator
 
@@ -126,6 +127,11 @@ class Annotation(BaseModel):
     human_reviewer: str | None = None
     cohens_kappa: float | None = None
     code_switching_ratio: float = 0.0
+    source_language: Literal["vi", "en"] = "vi"
+    asr_detected_language: str | None = None
+    text_detected_language: str | None = None
+    language_detect_confidence: float | None = None
+    language_mismatch: bool = False
     created_at: datetime
 
     def save(self, path: Path) -> None:

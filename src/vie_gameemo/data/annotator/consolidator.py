@@ -22,6 +22,8 @@ Bạn là chuyên gia phân tích cảm xúc đa phương thức. Viết đoạn
 (3-5 câu) bằng tiếng Việt, giải thích vì sao streamer này đang trong trạng
 thái {emotion_label}.
 
+Ngôn ngữ gốc của clip: {source_language}
+
 Bằng chứng đa phương thức:
 - Khuôn mặt (Action Units): {face_aus}
 - Cảnh và bối cảnh: {visual_objective}
@@ -29,6 +31,9 @@ Bằng chứng đa phương thức:
 - Lời nói (transcript): "{transcript}"
 
 Hướng dẫn:
+- Transcript có thể bằng tiếng Việt HOẶC tiếng Anh — hãy hiểu trực tiếp,
+  KHÔNG dịch transcript trong câu trả lời
+- Trả lời hoàn toàn bằng tiếng Việt
 - Liên kết các bằng chứng từ nhiều modality
 - Nếu có slang gaming tiếng Anh, hãy giải thích nghĩa
 - KHÔNG bịa thông tin không có trong bằng chứng
@@ -123,6 +128,7 @@ class Consolidator:
         visual_objective: str,
         audio_tone: str,
         transcript: str,
+        source_language: str = "vi",
     ) -> str:
         """Generate structured reasoning for one clip.
 
@@ -132,6 +138,7 @@ class Consolidator:
             visual_objective: Cvod from Qwen-VL.
             audio_tone: Catd from Qwen-Audio.
             transcript: Cls from Whisper.
+            source_language: "vi" or "en" — passed to prompt for context.
 
         Returns:
             Reasoning text in <think>...</think><answer>...</answer> format.
@@ -150,6 +157,7 @@ class Consolidator:
             visual_objective=visual_objective or "N/A",
             audio_tone=audio_tone or "N/A",
             transcript=transcript or "",
+            source_language=source_language,
         )
 
         for attempt in range(2):

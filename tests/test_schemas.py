@@ -143,6 +143,102 @@ class TestAnnotation:
         assert ann.webcam_bbox is not None
         assert ann.webcam_bbox.stability_score == 0.9
 
+    def test_default_source_language_vi(self, sample_annotation):
+        """Old VI clips without source_language should default to 'vi'."""
+        assert sample_annotation.source_language == "vi"
+
+    def test_source_language_en(self):
+        ann = Annotation(
+            clip_id="clip_en_001",
+            emotion_label=EmotionLabel.FEAR,
+            genre=GameGenre.HORROR,
+            face_aus={},
+            peak_frame_idx=3,
+            visual_objective_desc="Player in dark corridor.",
+            audio_tone_desc="Screaming, high pitch.",
+            transcript="Oh my god! What was that?!",
+            reasoning="Jump scare reaction.",
+            annotators=[],
+            source_language="en",
+            created_at=datetime.now(),
+        )
+        assert ann.source_language == "en"
+        assert ann.language_mismatch is False
+
+    def test_language_detect_fields(self):
+        ann = Annotation(
+            clip_id="clip_detect",
+            emotion_label=EmotionLabel.NEUTRAL,
+            genre=GameGenre.CASUAL,
+            face_aus={},
+            peak_frame_idx=0,
+            visual_objective_desc="",
+            audio_tone_desc="",
+            transcript="test",
+            reasoning="",
+            annotators=[],
+            source_language="vi",
+            asr_detected_language="en",
+            text_detected_language="en",
+            language_detect_confidence=0.85,
+            language_mismatch=True,
+            created_at=datetime.now(),
+        )
+        assert ann.asr_detected_language == "en"
+        assert ann.text_detected_language == "en"
+        assert ann.language_detect_confidence == 0.85
+        assert ann.language_mismatch is True
+
+    def test_backward_compat_old_vi_clip_no_lang_fields(self, tmp_path):
+        """Simulate loading a JSON from before bilingual support was added."""
+        old_json = {
+            "clip_id": "old_clip",
+            "emotion_label": "neutral",
+            "genre": "moba",
+            "face_aus": {},
+            "peak_frame_idx": 0,
+            "visual_objective_desc": "",
+            "audio_tone_desc": "",
+            "transcript": "xin chào",
+            "reasoning": "",
+            "annotators": [],
+            "code_switching_ratio": 0.0,
+            "created_at": datetime.now().isoformat(),
+        }
+        path = tmp_path / "old_clip.json"
+        path.write_text(json.dumps(old_json), encoding="utf-8")
+
+        loaded = Annotation.load(path)
+        assert loaded.source_language == "vi"
+        assert loaded.asr_detected_language is None
+        assert loaded.language_mismatch is False
+
+    def test_save_load_roundtrip_with_language(self, tmp_path):
+        ann = Annotation(
+            clip_id="clip_rt",
+            emotion_label=EmotionLabel.AMUSED,
+            genre=GameGenre.FPS,
+            face_aus={"AU12": 2.0},
+            peak_frame_idx=5,
+            visual_objective_desc="desc",
+            audio_tone_desc="tone",
+            transcript="let's go!",
+            reasoning="reason",
+            annotators=[],
+            source_language="en",
+            asr_detected_language="en",
+            text_detected_language="en",
+            language_detect_confidence=0.92,
+            language_mismatch=False,
+            created_at=datetime.now(),
+        )
+        path = tmp_path / "rt.json"
+        ann.save(path)
+        loaded = Annotation.load(path)
+        assert loaded.source_language == "en"
+        assert loaded.asr_detected_language == "en"
+        assert loaded.language_detect_confidence == 0.92
+
 
 class TestMultimodalFeatures:
     def test_save_and_load(self, tmp_path):

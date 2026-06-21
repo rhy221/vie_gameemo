@@ -27,11 +27,16 @@ logger = logging.getLogger(__name__)
 _COREASONER_PROMPT = """\
 Bạn là chuyên gia phân tích cảm xúc. Dựa vào các mô tả đa phương thức sau:
 
+Ngôn ngữ gốc của clip: {source_language}
+
 Khuôn mặt (Action Units): {face_aus}
 Bối cảnh và cảnh game: {visual_objective}
 Đặc điểm giọng nói: {audio_tone}
 Lời nói (transcript): "{transcript}"
 Các nhãn cảm xúc có thể: {emotion_categories}
+
+Transcript có thể bằng tiếng Việt hoặc tiếng Anh — hiểu trực tiếp, KHÔNG dịch.
+Trả lời hoàn toàn bằng tiếng Việt.
 
 Hãy phân tích và dự đoán cảm xúc của streamer theo format:
 <think>
@@ -238,4 +243,5 @@ class LLM2CoReasoner(BaseLLMReasoner):
             audio_tone=evidence.get("audio_tone", "N/A"),
             transcript=evidence.get("transcript", ""),
             emotion_categories=", ".join(categories),
+            source_language=evidence.get("source_language", "vi"),
         )

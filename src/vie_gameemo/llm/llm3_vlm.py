@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 _VLM_SYSTEM_PROMPT = """\
 Bạn là chuyên gia phân tích cảm xúc game streaming. Nhìn vào các hình ảnh từ clip sau và cho biết cảm xúc của streamer.
 
+Transcript có thể bằng tiếng Việt hoặc tiếng Anh — hiểu trực tiếp, KHÔNG dịch.
+Trả lời hoàn toàn bằng tiếng Việt.
+
 Trả lời theo format CHÍNH XÁC:
 <think>
 [Phân tích 3-5 câu về biểu cảm, âm thanh, và bối cảnh game]
@@ -145,7 +148,9 @@ class LLM3VLMEndToEnd(BaseLLMReasoner):
                 logger.debug("Spectrogram render failed: %s", exc)
 
         images = frames if frames else None
+        source_language = evidence.get("source_language", "vi")
         text_prompt = _VLM_SYSTEM_PROMPT
+        text_prompt += f"\nNgôn ngữ gốc của clip: {source_language}"
         if transcript:
             text_prompt += f'\nTranscript: "{transcript}"'
 

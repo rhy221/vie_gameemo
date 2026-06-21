@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "Bash(python -m pytest tests/ -v --tb=short)",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Projects\\\\vie-gameemo-skeleton\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)",
+      "Bash(python -m pytest tests/test_schemas.py -v)",
+      "Bash(python -m pytest tests/test_schemas.py -v -k \"language or backward_compat or source\")",
+      "Bash(python -c \"from vie_gameemo.data.schemas import Annotation; a = Annotation\\(clip_id='x', emotion_label='neutral', genre='moba', face_aus={}, peak_frame_idx=0, visual_objective_desc='', audio_tone_desc='', transcript='', reasoning='', annotators=[], source_language='en', created_at='2024-01-01T00:00:00'\\); print\\(f'OK: source_language={a.source_language}'\\)\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'src'\\); from vie_gameemo.data.schemas import Annotation; a = Annotation\\(clip_id='x', emotion_label='neutral', genre='moba', face_aus={}, peak_frame_idx=0, visual_objective_desc='', audio_tone_desc='', transcript='', reasoning='', annotators=[], source_language='en', created_at='2024-01-01T00:00:00'\\); print\\(f'OK: source_language={a.source_language}, mismatch={a.language_mismatch}'\\)\")",
+      "PowerShell(python -c \"import sys; sys.path.insert\\(0, 'src'\\); from vie_gameemo.data.schemas import Annotation; a = Annotation\\(clip_id='x', emotion_label='neutral', genre='moba', face_aus={}, peak_frame_idx=0, visual_objective_desc='', audio_tone_desc='', transcript='', reasoning='', annotators=[], source_language='en', created_at='2024-01-01T00:00:00'\\); print\\('OK: source_language=' + a.source_language + ', mismatch=' + str\\(a.language_mismatch\\)\\)\")",
+      "Bash(python -c ' *)"
     ]
   }
 }

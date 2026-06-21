@@ -149,15 +149,20 @@ def make_splits(
     seed: int = 42,
     stratify_by: list[str] | None = None,
     output_path: Path | None = None,
+    method: str = "iterative_multilabel",
 ) -> dict[str, list[str]]:
     """Create stratified train/val/test splits over annotation IDs.
+
+    Supports iterative multilabel stratification (trent-b) for joint
+    stratification on (emotion, source_language, genre, codeswitch_bucket).
 
     Args:
         annotations_dir: Path to annotations.
         split_ratios: Dict like {'train': 0.7, 'val': 0.15, 'test_id': 0.1, 'test_ood': 0.05}.
         seed: RNG seed.
-        stratify_by: Fields to stratify by (currently 'emotion_label' supported).
+        stratify_by: Fields to stratify by.
         output_path: If set, save the manifest JSON here.
+        method: "iterative_multilabel" | "random".
 
     Returns:
         Dict mapping split_name → list of clip_ids.
@@ -172,8 +177,11 @@ def make_splits(
     rng = random.Random(seed)
     clip_ids = [f.stem for f in ann_files]
 
-    if stratify_by:
-        # Group by label for stratification
+    if method == "iterative_multilabel" and stratify_by:
+        assignments = _iterative_multilabel_split(
+            ann_files, split_ratios, seed, stratify_by,
+        )
+    elif stratify_by:
         from collections import defaultdict
         groups: dict[str, list[str]] = defaultdict(list)
         for f in ann_files:
@@ -199,7 +207,173 @@ def make_splits(
         Path(output_path).write_text(json.dumps(assignments, indent=2), encoding="utf-8")
         logger.info("Split manifest saved to %s", output_path)
 
+    # Print distribution report
+    _print_split_report(ann_files, assignments)
+
     return splits
+
+
+def _iterative_multilabel_split(
+    ann_files: list[Path],
+    split_ratios: dict[str, float],
+    seed: int,
+    stratify_on: list[str],
+) -> dict[str, str]:
+    """Iterative multilabel stratification using trent-b's library.
+
+    Encodes (emotion, source_language, genre, codeswitch_bucket) as a
+    binary label matrix, then uses MultilabelStratifiedKFold to produce
+    balanced splits.
+    """
+    import numpy as np
+
+    annotations = []
+    clip_ids = []
+    for f in ann_files:
+        try:
+            ann = Annotation.load(f)
+            annotations.append(ann)
+            clip_ids.append(f.stem)
+        except Exception as exc:
+            logger.warning("Skipping %s: %s", f, exc)
+
+    if not annotations:
+        return {}
+
+    label_columns: dict[str, set[str]] = {}
+    rows: list[dict[str, str]] = []
+    for ann in annotations:
+        row = {}
+        if "emotion" in stratify_on:
+            row["emotion"] = ann.emotion_label.value
+            label_columns.setdefault("emotion", set()).add(ann.emotion_label.value)
+        if "source_language" in stratify_on:
+            lang = getattr(ann, "source_language", "vi")
+            row["source_language"] = lang
+            label_columns.setdefault("source_language", set()).add(lang)
+        if "genre" in stratify_on:
+            row["genre"] = ann.genre.value
+            label_columns.setdefault("genre", set()).add(ann.genre.value)
+        if "codeswitch_bucket" in stratify_on:
+            ratio = getattr(ann, "code_switching_ratio", 0.0)
+            bucket = "none" if ratio < 0.1 else ("low" if ratio < 0.3 else "high")
+            row["codeswitch_bucket"] = bucket
+            label_columns.setdefault("codeswitch_bucket", set()).add(bucket)
+        rows.append(row)
+
+    # Build binary label matrix
+    all_labels = []
+    for col_name, values in sorted(label_columns.items()):
+        for val in sorted(values):
+            all_labels.append((col_name, val))
+
+    Y = np.zeros((len(rows), len(all_labels)), dtype=int)
+    for i, row in enumerate(rows):
+        for j, (col_name, val) in enumerate(all_labels):
+            if row.get(col_name) == val:
+                Y[i, j] = 1
+
+    # Use MultilabelStratifiedKFold to create splits
+    try:
+        from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
+    except ImportError:
+        logger.warning(
+            "iterative-stratification not installed. "
+            "Run: pip install iterative-stratification. Falling back to random split."
+        )
+        rng = random.Random(seed)
+        ids = list(clip_ids)
+        rng.shuffle(ids)
+        return _assign_splits(ids, split_ratios)
+
+    split_names = list(split_ratios.keys())
+    split_fracs = list(split_ratios.values())
+
+    # Strategy: use k-fold where k = round(1/smallest_frac) to approximate ratios
+    # First split: train vs rest, then split rest into val/test_id/test_ood
+    n = len(clip_ids)
+    assignments: dict[str, str] = {}
+
+    train_frac = split_fracs[0]
+    rest_frac = 1.0 - train_frac
+    k_outer = max(2, round(1.0 / rest_frac))
+
+    mskf = MultilabelStratifiedKFold(n_splits=k_outer, shuffle=True, random_state=seed)
+    X_dummy = np.zeros((n, 1))
+
+    train_idx, rest_idx = next(mskf.split(X_dummy, Y))
+
+    for idx in train_idx:
+        assignments[clip_ids[idx]] = split_names[0]
+
+    if len(split_names) > 2:
+        rest_clip_ids = [clip_ids[i] for i in rest_idx]
+        rest_Y = Y[rest_idx]
+
+        remaining_ratios = {k: v for k, v in zip(split_names[1:], split_fracs[1:])}
+        total_remaining = sum(remaining_ratios.values())
+        normalized = {k: v / total_remaining for k, v in remaining_ratios.items()}
+
+        rest_rng = random.Random(seed + 1)
+        rest_ids_shuffled = list(rest_clip_ids)
+        rest_rng.shuffle(rest_ids_shuffled)
+        sub_assignments = _assign_splits(rest_ids_shuffled, normalized)
+        assignments.update(sub_assignments)
+    elif len(split_names) == 2:
+        for idx in rest_idx:
+            assignments[clip_ids[idx]] = split_names[1]
+
+    return assignments
+
+
+def _print_split_report(
+    ann_files: list[Path],
+    assignments: dict[str, str],
+) -> None:
+    """Print emotion × source_language distribution per split."""
+    from collections import Counter
+
+    ann_cache: dict[str, Annotation] = {}
+    for f in ann_files:
+        try:
+            ann_cache[f.stem] = Annotation.load(f)
+        except Exception:
+            pass
+
+    splits = sorted(set(assignments.values()))
+    emotions = [e.value for e in EmotionLabel]
+    languages = sorted({getattr(ann_cache.get(cid), "source_language", "vi") for cid in assignments})
+
+    logger.info("=" * 70)
+    logger.info("SPLIT DISTRIBUTION REPORT: emotion × source_language")
+    logger.info("=" * 70)
+
+    for split in splits:
+        split_ids = [cid for cid, s in assignments.items() if s == split]
+        logger.info("\n--- %s (n=%d) ---", split, len(split_ids))
+
+        counts: dict[str, Counter] = {e: Counter() for e in emotions}
+        for cid in split_ids:
+            ann = ann_cache.get(cid)
+            if ann is None:
+                continue
+            lang = getattr(ann, "source_language", "vi")
+            counts[ann.emotion_label.value][lang] += 1
+
+        header = f"  {'emotion':<12}" + "".join(f"{l:>6}" for l in languages) + f"{'total':>8}"
+        logger.info(header)
+        logger.info("  " + "-" * len(header.strip()))
+        for e in emotions:
+            row = f"  {e:<12}"
+            total = 0
+            for l in languages:
+                c = counts[e][l]
+                row += f"{c:>6}"
+                total += c
+            row += f"{total:>8}"
+            logger.info(row)
+
+    logger.info("=" * 70)
 
 
 def collate_fn(batch: list[dict]) -> dict:
