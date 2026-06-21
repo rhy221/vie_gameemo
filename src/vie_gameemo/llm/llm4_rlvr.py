@@ -19,13 +19,15 @@ import logging
 import re
 from pathlib import Path
 
+import torch
+
 from vie_gameemo.llm.base import BaseLLMReasoner, LLMOutput
 from vie_gameemo.llm.llm1_explainer import _make_bnb_config
 from vie_gameemo.llm.llm2_coreasoner import LLM2CoReasoner
 
 logger = logging.getLogger(__name__)
 
-_VALID_LABELS = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
+_VALID_LABELS = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +97,8 @@ class LLM4RLVR(BaseLLMReasoner):
         max_new_tokens: int = 400,
         temperature: float = 0.7,
         use_vllm: bool = False,
+        modal_adapter_ckpt: Path | None = None,
+        d_fusion: int = 768,
     ) -> None:
         """Initialize for inference.
 
@@ -105,6 +109,9 @@ class LLM4RLVR(BaseLLMReasoner):
             max_new_tokens: Max gen length.
             temperature: Sampling temp.
             use_vllm: Use vLLM for fast inference (requires vllm package).
+            modal_adapter_ckpt: Path to cognition checkpoint with 'llm_adapter' weights.
+                Enables annotation-free inference via soft token injection.
+            d_fusion: Fusion embedding dim (768, from ConvAttention4M).
         """
         self.base_model = base_model
         self.adapter_path = adapter_path
@@ -112,9 +119,13 @@ class LLM4RLVR(BaseLLMReasoner):
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.use_vllm = use_vllm
+        self.modal_adapter_ckpt = Path(modal_adapter_ckpt) if modal_adapter_ckpt else None
+        self.d_fusion = d_fusion
         self.model = None
         self.tokenizer = None
         self._vllm_model = None
+        self.modal_adapter = None
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def load(self) -> None:
         """Load base model + LoRA adapter for inference."""
@@ -145,6 +156,16 @@ class LLM4RLVR(BaseLLMReasoner):
             logger.info("Loaded RLVR LoRA adapter from %s", self.adapter_path)
 
         self.model.eval()
+
+        if self.modal_adapter_ckpt is not None and self.modal_adapter_ckpt.exists():
+            from vie_gameemo.llm.modal_adapter import ModalAdapter
+            llm_hidden = self.model.config.hidden_size
+            self.modal_adapter = ModalAdapter.from_checkpoint(
+                self.modal_adapter_ckpt, d_fusion=self.d_fusion, d_llm=llm_hidden
+            ).to(self.device)
+            self.modal_adapter.eval()
+            logger.info("Loaded ModalAdapter from %s", self.modal_adapter_ckpt)
+
         logger.info("LLM-4 loaded (HF backend)")
 
     def _load_vllm(self) -> None:
@@ -172,11 +193,11 @@ class LLM4RLVR(BaseLLMReasoner):
     def unload(self) -> None:
         """Free VRAM."""
         import gc
-        import torch
 
         self.model = None
         self.tokenizer = None
         self._vllm_model = None
+        self.modal_adapter = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -184,9 +205,13 @@ class LLM4RLVR(BaseLLMReasoner):
     def reason(self, evidence: dict) -> LLMOutput:
         """Generate <think>/<answer> for one sample.
 
+        Dispatches to annotation-free path when evidence contains 'fusion_emb'
+        and modal adapter is loaded; otherwise uses text evidence path.
+
         Args:
-            evidence: Same as LLM-2 (modality descriptions + transcript):
-                'face_aus', 'visual_objective', 'audio_tone', 'transcript'.
+            evidence: Dict with either:
+                - Text path: 'face_aus', 'visual_objective', 'audio_tone', 'transcript'
+                - Embedding path: 'fusion_emb' (Tensor, shape (1, T, 768))
                 Optionally 'emotion_categories'.
 
         Returns:
@@ -194,6 +219,9 @@ class LLM4RLVR(BaseLLMReasoner):
         """
         if self.model is None and self._vllm_model is None:
             self.load()
+
+        if "fusion_emb" in evidence and self.modal_adapter is not None:
+            return self._reason_with_embeddings(evidence["fusion_emb"])
 
         prompt = LLM2CoReasoner.build_prompt(evidence)
 
@@ -204,6 +232,42 @@ class LLM4RLVR(BaseLLMReasoner):
 
         from vie_gameemo.llm.llm1_explainer import LLM1Explainer
         reasoning, answer, fmt_valid = LLM1Explainer.parse_output(raw)
+        return LLMOutput(reasoning=reasoning, answer=answer, raw=raw, format_valid=fmt_valid)
+
+    def _reason_with_embeddings(self, fusion_emb: torch.Tensor) -> LLMOutput:
+        """Annotation-free path: inject fusion embedding as soft token via modal adapter.
+
+        Args:
+            fusion_emb: (1, T, d_fusion) fused embedding from ConvAttention4M.
+
+        Returns:
+            LLMOutput from soft-token-conditioned generation.
+        """
+        from vie_gameemo.llm.llm1_explainer import LLM1Explainer
+
+        fusion_emb = fusion_emb.to(self.device)
+        with torch.no_grad():
+            soft_token = self.modal_adapter(fusion_emb).mean(dim=1, keepdim=True)  # (1, 1, H)
+
+            instruction = (
+                "Dựa trên đặc trưng đa phương thức của clip game, hãy phân tích "
+                "và xác định cảm xúc của streamer. Trả lời theo định dạng "
+                "<think>[lý luận]</think><answer>[nhãn]</answer>."
+            )
+            text_ids = self.tokenizer.encode(instruction, return_tensors="pt").to(self.device)
+            text_embeds = self.model.get_input_embeddings()(text_ids)  # (1, L, H)
+
+            inputs_embeds = torch.cat([soft_token, text_embeds], dim=1)  # (1, 1+L, H)
+
+            out_ids = self.model.generate(
+                inputs_embeds=inputs_embeds,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+            raw = self.tokenizer.decode(out_ids[0], skip_special_tokens=True)
+
+        reasoning, answer, fmt_valid = LLM1Explainer.parse_output(raw, "neutral")
         return LLMOutput(reasoning=reasoning, answer=answer, raw=raw, format_valid=fmt_valid)
 
     def reason_batch(self, evidences: list[dict]) -> list[LLMOutput]:

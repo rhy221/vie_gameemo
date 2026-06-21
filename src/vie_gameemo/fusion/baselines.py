@@ -26,7 +26,7 @@ class LateFusion(nn.Module):
     the Conv-Attention module. The classifier will pool this further.
     """
 
-    def __init__(self, d_model: int = 768, n_classes: int = 9) -> None:
+    def __init__(self, d_model: int = 768, n_classes: int = 8) -> None:
         super().__init__()
         self.proj_audio = nn.Linear(d_model, d_model)
         self.proj_face = nn.Linear(d_model, d_model)

@@ -98,7 +98,7 @@ def run_strategy_ablation(
                 output_path=splits_path,
             )
 
-        label_names = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
+        label_names = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
         label2idx = {l: i for i, l in enumerate(label_names)}
 
         train_ds = VieGameEmoDataset(

@@ -323,21 +323,20 @@ Workflow:
 
 **Schema A — Ekman 7 (tham khảo):** `vui, buồn, tức giận, sợ hãi, ngạc nhiên, ghê tởm, trung tính`
 
-**Schema B — Gaming-specific 9 (gaming_9) — schema chính thức (`n_classes=9`):**
+**Schema B — Gaming-specific 8 (gaming_8) — schema chính thức (`n_classes=8`):**
 
 | # | Nhãn | Tiếng Việt | Đặc điểm |
 |---|------|-----------|----------|
-| 0 | neutral   | Trung tính   | Idle, giải thích, chờ |
-| 1 | focus     | Tập trung    | Tryhard, căng thẳng, nghiêm túc |
-| 2 | hype      | Phấn khích   | Clutch, ace, thắng lớn |
-| 3 | amused    | Hài hước     | Cười, khoảnh khắc buồn cười |
-| 4 | tilted    | Cay cú       | Tức giận, thất vọng, toxic |
-| 5 | sad       | Buồn         | Thua, hối hận, chán nản |
-| 6 | shocked   | Sốc          | Ngạc nhiên mạnh, jump scare |
-| 7 | fear      | Sợ hãi       | Game kinh dị, hoảng loạn |
-| 8 | disgusted | Ghê tởm      | Gore, đồng đội tệ, cringe |
+| 0 | neutral   | Trung tính   | Idle, giải thích, chờ, tryhard yên lặng |
+| 1 | hype      | Phấn khích   | Clutch, ace, thắng lớn |
+| 2 | amused    | Hài hước     | Cười, khoảnh khắc buồn cười |
+| 3 | tilted    | Cay cú       | Tức giận, thất vọng, toxic |
+| 4 | sad       | Buồn         | Thua, hối hận, chán nản |
+| 5 | shocked   | Sốc          | Ngạc nhiên mạnh, jump scare |
+| 6 | fear      | Sợ hãi       | Game kinh dị, hoảng loạn |
+| 7 | disgusted | Ghê tởm      | Gore, đồng đội tệ, cringe |
 
-> **Lưu ý:** Toàn bộ codebase dùng `gaming_9` với `n_classes=9`. Schema Ekman 7 chỉ dùng trong ablation so sánh.
+> **Lưu ý:** Toàn bộ codebase dùng `gaming_8` với `n_classes=8`. Schema Ekman 7 chỉ dùng trong ablation so sánh.
 
 ### 2.7. Thử nghiệm Stage 0
 
@@ -1348,14 +1347,57 @@ class EmotionClassifier(nn.Module):
 
 ## 9. Stage 5 — LLM Reasoner (4 Setup, Có RLVR)
 
+### 9.0. Modal Adapter — Inference Không Cần Annotation
+
+**File:** `src/vie_gameemo/llm/modal_adapter.py`
+
+Khi không có annotation JSON (clip mới, inference real-time), LLM-2/4 không có text evidence
+(`face_aus`, `visual_objective`, `audio_tone`). **Modal Adapter** giải quyết vấn đề này theo cơ chế
+của Emotion-LLaMAv2 (arXiv:2601.16449, Section 4.4):
+
+```
+u_fusion (B, T, 768)
+      ↓  ModalAdapter [Linear 768 → d_llm, e.g. 4096]
+soft_token (B, 1, d_llm)   ← mean pool over T
+      ↓  concat với instruction text tokens
+inputs_embeds (B, 1+L, d_llm)
+      ↓  LLM.generate(inputs_embeds=...)
+<think>[lý luận]</think><answer>LABEL</answer>
+```
+
+**Không convert thành text** — projection thẳng vào LLM embedding space, LLM attend vào "soft tokens"
+như token thường qua self-attention.
+
+**Được train** trong Stage 2 (Cognition): `ModalAdapter` + `LLM LoRA` cùng tối ưu trên reasoning data.
+Saved tại `outputs/checkpoints/cognition_best.pt["llm_adapter"]`.
+
+**Dispatch logic trong LLM-2/4:**
+```python
+if "fusion_emb" in evidence and self.modal_adapter is not None:
+    return self._reason_with_embeddings(evidence["fusion_emb"])  # annotation-free
+return self._reason_with_text(evidence)                          # cần annotation
+```
+
+**Input lookup khi inference:**
+
+| Tình huống | Evidence dict | LLM path |
+|---|---|---|
+| Có annotation JSON | `face_aus`, `visual_objective`, `audio_tone`, `transcript` | Text evidence |
+| Không có annotation | `fusion_emb` (tensor từ `_forward()`) | Modal Adapter soft tokens |
+
+**Config:** đặt `llm.cognition_checkpoint: "outputs/checkpoints/cognition_best.pt"` trong `config.yaml`
+sau khi train Stage 2 để enable annotation-free path.
+
+---
+
 ### 9.1. Tổng quan 4 setup
 
-| Setup | Vai trò LLM | Training | Compute |
-|---|---|---|---|
-| **LLM-1: Post-hoc Explainer** | Giải thích sau prediction | No training | Lowest |
-| **LLM-2: Co-Reasoner** | Tham gia inference (modality-to-text) | Optional SFT | Low |
-| **LLM-3: VLM End-to-End** | Backbone đa phương thức | LoRA fine-tune | High |
-| **LLM-4: RLVR-trained (MỚI)** | Reinforcement learning | Cold start + GRPO | Highest |
+| Setup | Vai trò LLM | Training | Input nguồn nào | Annotation-free? |
+|---|---|---|---|---|
+| **LLM-1: Post-hoc Explainer** | Giải thích sau prediction | No training | Label + text evidence | ❌ Cần label/evidence |
+| **LLM-2: Co-Reasoner** | Tham gia inference | Optional SFT + Modal Adapter | Text evidence **hoặc fusion_emb** | ✅ Nếu có cognition ckpt |
+| **LLM-3: VLM End-to-End** | Backbone đa phương thức | LoRA fine-tune | Raw frames + audio | ✅ Luôn luôn |
+| **LLM-4: RLVR-trained (MỚI)** | Reinforcement learning | Cold start + GRPO + Modal Adapter | Text evidence **hoặc fusion_emb** | ✅ Nếu có cognition ckpt |
 
 ### 9.2. Setup LLM-1 — Post-hoc Explainer
 

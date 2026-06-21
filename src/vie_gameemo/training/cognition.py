@@ -106,9 +106,10 @@ def train_cognition(
         llm = get_peft_model(llm, lora_config)
         llm.print_trainable_parameters()
 
-    # LLM adapter: project fusion dim → LLM hidden
+    # Modal adapter: project fusion dim → LLM embedding space (Emotion-LLaMAv2 pattern)
+    from vie_gameemo.llm.modal_adapter import ModalAdapter
     llm_hidden_size = llm.config.hidden_size
-    llm_adapter = torch.nn.Linear(fcfg.d_model, llm_hidden_size).to(device)
+    llm_adapter = ModalAdapter(d_fusion=fcfg.d_model, d_llm=llm_hidden_size).to(device)
 
     cls_criterion = FocalLoss(gamma=ccfg.loss.focal.gamma)
 
@@ -167,22 +168,41 @@ def train_cognition(
 
             cls_loss = cls_criterion(cls_logits, labels)
 
-            # Language modeling loss on reasoning (if reasoning_text in batch)
+            # Language modeling loss: soft token (from modal adapter) + reasoning text
             lm_loss = torch.tensor(0.0, device=device)
             reasoning_texts = batch.get("reasoning_text")
             if reasoning_texts:
-                vision_embeds = llm_adapter(fused)  # (B, T, llm_hidden)
+                B = fused.shape[0]
+                # Pool fused sequence → 1 soft token per sample, project to LLM dim
+                soft_token = llm_adapter(fused).mean(dim=1, keepdim=True)  # (B, 1, H)
+
                 inputs = tokenizer(
                     list(reasoning_texts),
                     return_tensors="pt",
                     truncation=True,
-                    max_length=256,
+                    max_length=255,
                     padding=True,
                 ).to(device)
+
+                embed_fn = llm.get_input_embeddings()
+                text_embeds = embed_fn(inputs["input_ids"])          # (B, L, H)
+
+                # Inject soft token before text: [soft_token | text_tokens]
+                inputs_embeds = torch.cat([soft_token, text_embeds], dim=1)  # (B, 1+L, H)
+                attn_mask = torch.cat([
+                    torch.ones(B, 1, device=device, dtype=torch.long),
+                    inputs["attention_mask"],
+                ], dim=1)
+                # Mask soft token from language modeling loss (-100 = ignore)
+                labels = torch.cat([
+                    torch.full((B, 1), -100, device=device, dtype=torch.long),
+                    inputs["input_ids"],
+                ], dim=1)
+
                 lm_out = llm(
-                    input_ids=inputs["input_ids"],
-                    attention_mask=inputs["attention_mask"],
-                    labels=inputs["input_ids"],
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attn_mask,
+                    labels=labels,
                 )
                 lm_loss = lm_out.loss
 

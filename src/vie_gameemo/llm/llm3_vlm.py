@@ -20,7 +20,7 @@ Trả lời theo format CHÍNH XÁC:
 <think>
 [Phân tích 3-5 câu về biểu cảm, âm thanh, và bối cảnh game]
 </think>
-<answer>[neutral/focus/hype/amused/tilted/sad/shocked/fear/disgusted]</answer>
+<answer>[neutral/hype/amused/tilted/sad/shocked/fear/disgusted]</answer>
 """
 
 

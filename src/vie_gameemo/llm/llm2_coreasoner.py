@@ -8,9 +8,16 @@ Each modality is first converted to a text description:
 
 The LLM then reasons over these text descriptions and makes its own
 emotion prediction (not just explanation like LLM-1).
+
+Annotation-free path: when evidence contains 'fusion_emb' (a (1, T, 768)
+tensor) and a cognition checkpoint is provided, ModalAdapter projects the
+embedding into the LLM space as a soft token, bypassing text evidence.
 """
 
 import logging
+from pathlib import Path
+
+import torch
 
 from vie_gameemo.llm.base import BaseLLMReasoner, LLMOutput
 from vie_gameemo.llm.llm1_explainer import LLM1Explainer, _make_bnb_config
@@ -33,7 +40,7 @@ Hãy phân tích và dự đoán cảm xúc của streamer theo format:
 <answer>[một nhãn cảm xúc từ danh sách trên]</answer>
 """
 
-_VALID_LABELS = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
+_VALID_LABELS = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
 
 class LLM2CoReasoner(BaseLLMReasoner):
@@ -46,6 +53,8 @@ class LLM2CoReasoner(BaseLLMReasoner):
         max_new_tokens: int = 400,
         temperature: float = 0.5,
         finetuned_checkpoint: str | None = None,
+        modal_adapter_ckpt: Path | None = None,
+        d_fusion: int = 768,
     ) -> None:
         """Initialize.
 
@@ -55,14 +64,21 @@ class LLM2CoReasoner(BaseLLMReasoner):
             max_new_tokens: Max generation length.
             temperature: Sampling temperature.
             finetuned_checkpoint: Optional path to LoRA adapter from SFT step.
+            modal_adapter_ckpt: Path to cognition checkpoint containing 'llm_adapter'
+                weights. When provided, enables annotation-free inference via soft tokens.
+            d_fusion: Fusion embedding dim (768 by default, matches ConvAttention4M output).
         """
         self.model_name = model_name
         self.quantization = quantization
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.finetuned_checkpoint = finetuned_checkpoint
+        self.modal_adapter_ckpt = Path(modal_adapter_ckpt) if modal_adapter_ckpt else None
+        self.d_fusion = d_fusion
         self.model = None
         self.tokenizer = None
+        self.modal_adapter = None
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def load(self) -> None:
         """Load model + tokenizer, with optional LoRA adapter."""
@@ -86,25 +102,39 @@ class LLM2CoReasoner(BaseLLMReasoner):
             logger.info("Loaded LoRA adapter from %s", self.finetuned_checkpoint)
 
         self.model.eval()
+
+        if self.modal_adapter_ckpt is not None and self.modal_adapter_ckpt.exists():
+            from vie_gameemo.llm.modal_adapter import ModalAdapter
+            llm_hidden = self.model.config.hidden_size
+            self.modal_adapter = ModalAdapter.from_checkpoint(
+                self.modal_adapter_ckpt, d_fusion=self.d_fusion, d_llm=llm_hidden
+            ).to(self.device)
+            self.modal_adapter.eval()
+            logger.info("Loaded ModalAdapter from %s", self.modal_adapter_ckpt)
+
         logger.info("LLM-2 loaded")
 
     def unload(self) -> None:
         """Free VRAM."""
         import gc
-        import torch
         self.model = None
         self.tokenizer = None
+        self.modal_adapter = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def reason(self, evidence: dict) -> LLMOutput:
-        """Reason given modality descriptions.
+        """Reason given evidence.
+
+        Dispatches to annotation-free path when evidence contains 'fusion_emb'
+        and modal adapter is loaded; otherwise uses text evidence path.
 
         Args:
-            evidence: Dict with keys:
-                'face_aus', 'visual_objective', 'audio_tone', 'transcript'.
-                Optionally 'emotion_categories' (list of valid label strings).
+            evidence: Dict with either:
+                - Text path: 'face_aus', 'visual_objective', 'audio_tone', 'transcript'
+                - Embedding path: 'fusion_emb' (Tensor, shape (1, T, 768))
+                Optionally 'emotion_categories'.
 
         Returns:
             LLMOutput with predicted label and reasoning.
@@ -112,9 +142,49 @@ class LLM2CoReasoner(BaseLLMReasoner):
         if self.model is None:
             self.load()
 
+        if "fusion_emb" in evidence and self.modal_adapter is not None:
+            return self._reason_with_embeddings(evidence["fusion_emb"])
+        return self._reason_with_text(evidence)
+
+    def _reason_with_text(self, evidence: dict) -> LLMOutput:
+        """Text evidence path (requires annotation JSON fields)."""
         prompt = self.build_prompt(evidence)
         raw = self._generate(prompt)
         reasoning, answer, fmt_valid = LLM1Explainer.parse_output(raw)
+        return LLMOutput(reasoning=reasoning, answer=answer, raw=raw, format_valid=fmt_valid)
+
+    def _reason_with_embeddings(self, fusion_emb: torch.Tensor) -> LLMOutput:
+        """Annotation-free path: inject fusion embedding as soft token via modal adapter.
+
+        Args:
+            fusion_emb: (1, T, d_fusion) fused embedding from ConvAttention4M.
+
+        Returns:
+            LLMOutput from soft-token-conditioned generation.
+        """
+        fusion_emb = fusion_emb.to(self.device)
+        with torch.no_grad():
+            soft_token = self.modal_adapter(fusion_emb).mean(dim=1, keepdim=True)  # (1, 1, H)
+
+            instruction = (
+                "Dựa trên đặc trưng đa phương thức của clip game, hãy phân tích "
+                "và xác định cảm xúc của streamer. Trả lời theo định dạng "
+                "<think>[lý luận]</think><answer>[nhãn]</answer>."
+            )
+            text_ids = self.tokenizer.encode(instruction, return_tensors="pt").to(self.device)
+            text_embeds = self.model.get_input_embeddings()(text_ids)  # (1, L, H)
+
+            inputs_embeds = torch.cat([soft_token, text_embeds], dim=1)  # (1, 1+L, H)
+
+            out_ids = self.model.generate(
+                inputs_embeds=inputs_embeds,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+            raw = self.tokenizer.decode(out_ids[0], skip_special_tokens=True)
+
+        reasoning, answer, fmt_valid = LLM1Explainer.parse_output(raw, "neutral")
         return LLMOutput(reasoning=reasoning, answer=answer, raw=raw, format_valid=fmt_valid)
 
     def reason_batch(self, evidences: list[dict]) -> list[LLMOutput]:

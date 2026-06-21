@@ -188,28 +188,27 @@ annotation:
 
 # Labeling schemas (try both in ablation)
 labeling:
-  primary_schema: "gaming_9"   # "ekman_7" or "gaming_9"
+  primary_schema: "gaming_8"   # "ekman_7" or "gaming_8"
   schemas:
     ekman_7:
       labels: ["vui", "buon", "tuc_gian", "so_hai", "ngac_nhien", "ghe_tom", "trung_tinh"]
-    gaming_9:
-      # Order is canonical; class indices follow this order (0..8).
+    gaming_8:
+      # Order is canonical; class indices follow this order (0..7).
       # See docs/annotation_guideline.md for definitions and decision rules.
-      labels: ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
+      labels: ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
   # Target per-class share of the dataset (sums to 1.0).
   # Tiered by livestream prevalence: common > medium > rare.
-  # 600 clips → 84 / 78 / 78 / 66 / 66 / 60 / 66 / 54 / 48
+  # 600 clips → 120 / 90 / 78 / 78 / 66 / 72 / 54 / 42
   class_distribution:
-    neutral:   0.14    # common: baseline/idle/explaining
-    focus:     0.13    # common: tryhard, intense gameplay
-    hype:      0.13    # common: clutch, ace, win
-    amused:    0.11    # medium: laugh, funny moment
-    tilted:    0.11    # medium: frustration, anger
-    sad:       0.10    # medium: loss, regret
-    shocked:   0.11    # medium: surprise, jump scare reaction
+    neutral:   0.20    # common: baseline/idle/explaining/silent tryhard
+    hype:      0.15    # common: clutch, ace, win
+    amused:    0.13    # common: laugh, funny moment
+    tilted:    0.13    # medium: frustration, anger
+    sad:       0.11    # medium: loss, regret
+    shocked:   0.12    # medium: surprise, jump scare reaction
     fear:      0.09    # rare:   horror games, panic
-    disgusted: 0.08    # rare:   gore, bad teammate, cringe
+    disgusted: 0.07    # rare:   gore, bad teammate, cringe
 
   # Annotation reliability
   min_cohens_kappa: 0.6
@@ -325,7 +324,7 @@ classifier:
   hidden_dim: 256
   dropout: 0.3
   activation: "gelu"
-  n_classes: 9                 # match labeling.primary_schema (gaming_9)
+  n_classes: 8                 # match labeling.primary_schema (gaming_8)
 
   loss:
     type: "focal"              # "ce" | "weighted_ce" | "focal"
@@ -339,6 +338,10 @@ classifier:
 llm:
   # Active setup for current run
   active_setup: "llm1"   # "llm1" | "llm2" | "llm3" | "llm4"
+
+  # Path to cognition checkpoint (for ModalAdapter in LLM-2/4).
+  # Set after running: python scripts/train.py --stage cognition
+  cognition_checkpoint: null   # e.g. "outputs/checkpoints/cognition_best.pt"
 
   # Shared base model (for setups that need one)
   base_model:
