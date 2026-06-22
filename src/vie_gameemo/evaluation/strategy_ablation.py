@@ -64,7 +64,7 @@ def run_strategy_ablation(
     import torch
     from torch.utils.data import DataLoader
 
-    from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn, make_splits
+    from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn
     from vie_gameemo.evaluation.metrics import compute_metrics
     from vie_gameemo.evaluation.per_genre import per_genre_metrics
     from vie_gameemo.training.perception import evaluate, train_perception
@@ -89,38 +89,25 @@ def run_strategy_ablation(
         strategy_cfg.paths.checkpoints = str(strategy_dir)
 
         annotations_dir = Path(cfg.paths.annotations)
-        splits_path = annotations_dir / "splits.json"
-        if not splits_path.exists():
-            make_splits(
-                annotations_dir=annotations_dir,
-                split_ratios=(0.70, 0.15, 0.10, 0.05),
-                seed=cfg.seed,
-                output_path=splits_path,
-            )
-
-        label_names = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
-        label2idx = {l: i for i, l in enumerate(label_names)}
+        splits_path = Path(getattr(cfg.paths, "split_manifest", "data/splits.json"))
 
         train_ds = VieGameEmoDataset(
             annotations_dir=annotations_dir,
             features_dir=Path(cfg.paths.features),
             split="train",
-            splits_path=splits_path,
-            label2idx=label2idx,
+            split_manifest=splits_path if splits_path.exists() else None,
         )
         val_ds = VieGameEmoDataset(
             annotations_dir=annotations_dir,
             features_dir=Path(cfg.paths.features),
             split="val",
-            splits_path=splits_path,
-            label2idx=label2idx,
+            split_manifest=splits_path if splits_path.exists() else None,
         )
         test_ds = VieGameEmoDataset(
             annotations_dir=annotations_dir,
             features_dir=Path(cfg.paths.features),
-            split="test_id",
-            splits_path=splits_path,
-            label2idx=label2idx,
+            split="test",
+            split_manifest=splits_path if splits_path.exists() else None,
         )
 
         pcfg = strategy_cfg.training.perception

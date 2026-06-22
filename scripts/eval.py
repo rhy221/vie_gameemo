@@ -44,8 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     parser.add_argument("--checkpoint", type=Path, default=None,
                         help="Trained checkpoint (required unless --ablation)")
-    parser.add_argument("--split", default="test_id",
-                        choices=["val", "test_id", "test_ood"])
+    parser.add_argument("--split", default="test",
+                        choices=["train", "val", "test", "test_id", "test_ood"])
     parser.add_argument("--per-genre", action="store_true",
                         help="Add per-genre breakdown")
     parser.add_argument("--include-reasoning", action="store_true",
@@ -68,7 +68,17 @@ def main() -> int:
         results = _run_ablation(cfg, args)
     else:
         if not args.checkpoint:
-            raise ValueError("--checkpoint required when --ablation not used")
+            ckpt_dir = Path(cfg.paths.checkpoints)
+            candidates = sorted(ckpt_dir.glob("perception_best*.pt"), reverse=True)
+            if not candidates:
+                candidates = sorted(ckpt_dir.glob("*.pt"), reverse=True)
+            if candidates:
+                args.checkpoint = candidates[0]
+                logger.info("Auto-detected checkpoint: %s", args.checkpoint)
+            else:
+                raise ValueError(
+                    f"--checkpoint required (no .pt found in {ckpt_dir})"
+                )
         results = _run_eval(cfg, args)
 
     write_json(results, args.output)
@@ -81,7 +91,7 @@ def _run_eval(cfg, args) -> dict:
     from torch.utils.data import DataLoader
 
     from vie_gameemo.classifiers.mlp import EmotionClassifier
-    from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn, make_splits
+    from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn
     from vie_gameemo.evaluation.metrics import compute_metrics
     from vie_gameemo.evaluation.per_genre import per_genre_metrics
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
@@ -120,21 +130,13 @@ def _run_eval(cfg, args) -> dict:
     classifier.eval()
 
     annotations_dir = Path(cfg.paths.annotations)
-    splits_path = annotations_dir / "splits.json"
-    if not splits_path.exists():
-        make_splits(
-            annotations_dir=annotations_dir,
-            split_ratios=(0.70, 0.15, 0.10, 0.05),
-            seed=cfg.seed,
-            output_path=splits_path,
-        )
+    splits_path = Path(getattr(cfg.paths, "split_manifest", "data/splits.json"))
 
     dataset = VieGameEmoDataset(
         annotations_dir=annotations_dir,
         features_dir=Path(cfg.paths.features),
         split=args.split,
-        splits_path=splits_path,
-        label2idx=_LABEL2IDX,
+        split_manifest=splits_path if splits_path.exists() else None,
     )
     loader = DataLoader(
         dataset,
@@ -261,7 +263,7 @@ def _run_fusion_ablation(cfg, output_dir: Path) -> dict:
         sub_cfg.fusion.type = fusion_type
         sub_cfg.paths.checkpoints = str(output_dir / f"fusion_{fusion_type}")
 
-        from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn, make_splits
+        from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn
         from vie_gameemo.evaluation.metrics import compute_metrics
         from vie_gameemo.training.perception import train_perception
 
@@ -270,13 +272,12 @@ def _run_fusion_ablation(cfg, output_dir: Path) -> dict:
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         annotations_dir = Path(cfg.paths.annotations)
-        splits_path = annotations_dir / "splits.json"
-        if not splits_path.exists():
-            make_splits(annotations_dir, output_path=splits_path, seed=cfg.seed)
+        splits_path = Path(getattr(cfg.paths, "split_manifest", "data/splits.json"))
 
-        label2idx = {l: i for i, l in enumerate(_EMOTION_LABELS)}
-        train_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "train", splits_path, label2idx)
-        val_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "val", splits_path, label2idx)
+        train_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "train",
+                                     split_manifest=splits_path if splits_path.exists() else None)
+        val_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "val",
+                                   split_manifest=splits_path if splits_path.exists() else None)
 
         bs = sub_cfg.training.perception.batch_size
         train_loader = DataLoader(train_ds, batch_size=bs, shuffle=True, collate_fn=collate_fn)
@@ -294,7 +295,8 @@ def _run_fusion_ablation(cfg, output_dir: Path) -> dict:
                                   return_attention=False, **modality_dim_kwargs(fcfg)).to(device)
             cls_m = EmotionClassifier(fcfg.d_model, ccfg.hidden_dim, ccfg.n_classes, ccfg.dropout).to(device)
             load_checkpoint(ckpt, fusion_m, cls_m)
-            test_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "test_id", splits_path, label2idx)
+            test_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "test",
+                                        split_manifest=splits_path if splits_path.exists() else None)
             test_loader = DataLoader(test_ds, batch_size=bs, shuffle=False, collate_fn=collate_fn)
             metrics = evaluate(fusion_m, cls_m, test_loader, device, ccfg.n_classes)
             metrics.pop("confusion_matrix", None)
