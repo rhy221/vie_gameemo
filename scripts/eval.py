@@ -84,13 +84,21 @@ def _run_eval(cfg, args) -> dict:
     from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn, make_splits
     from vie_gameemo.evaluation.metrics import compute_metrics
     from vie_gameemo.evaluation.per_genre import per_genre_metrics
-    from vie_gameemo.fusion import get_fusion
-    from vie_gameemo.training.perception import load_checkpoint
+    from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
+    from vie_gameemo.training.perception import (
+        infer_fusion_dims_from_checkpoint,
+        load_checkpoint,
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     fcfg = cfg.fusion
     ccfg = cfg.classifier
 
+    # Build fusion to match the checkpoint's actual architecture. The checkpoint
+    # is the source of truth for per-modality dims (text_dim, etc.); fall back
+    # to config when the checkpoint doesn't pin them down.
+    dim_kwargs = modality_dim_kwargs(fcfg)
+    dim_kwargs.update(infer_fusion_dims_from_checkpoint(args.checkpoint, fcfg.d_model))
     fusion = get_fusion(
         fcfg.type,
         d_model=fcfg.d_model,
@@ -99,6 +107,7 @@ def _run_eval(cfg, args) -> dict:
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
+        **dim_kwargs,
     ).to(device)
     classifier = EmotionClassifier(
         d_model=fcfg.d_model,
@@ -276,13 +285,13 @@ def _run_fusion_ablation(cfg, output_dir: Path) -> dict:
         try:
             ckpt = train_perception(sub_cfg, train_loader, val_loader, device)
             from vie_gameemo.classifiers.mlp import EmotionClassifier
-            from vie_gameemo.fusion import get_fusion
+            from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
             from vie_gameemo.training.perception import evaluate, load_checkpoint
 
             fcfg = sub_cfg.fusion
             ccfg = sub_cfg.classifier
             fusion_m = get_fusion(fusion_type, d_model=fcfg.d_model, n_modalities=fcfg.n_modalities,
-                                  return_attention=False).to(device)
+                                  return_attention=False, **modality_dim_kwargs(fcfg)).to(device)
             cls_m = EmotionClassifier(fcfg.d_model, ccfg.hidden_dim, ccfg.n_classes, ccfg.dropout).to(device)
             load_checkpoint(ckpt, fusion_m, cls_m)
             test_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "test_id", splits_path, label2idx)
