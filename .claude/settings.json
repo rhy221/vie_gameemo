@@ -3,7 +3,8 @@
     "allow": [
       "Bash(python -m pytest tests/ -v --tb=short)",
       "Bash(pip install *)",
-      "PowerShell(python -m pytest tests/ -v --tb=short 2>&1)"
+      "PowerShell(python -m pytest tests/ -v --tb=short 2>&1)",
+      "Bash(pdftotext \"c:\\\\Projects\\\\vie-gameemo-skeleton\\\\2601.16449v2.pdf\" -)"
     ]
   }
 }

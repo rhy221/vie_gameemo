@@ -5,6 +5,7 @@ from sklearn.metrics import (
     cohen_kappa_score,
     confusion_matrix,
     f1_score,
+    precision_score,
     recall_score,
 )
 
@@ -43,12 +44,14 @@ def compute_metrics(
     uar = float(recall_score(y_true, y_pred, labels=all_classes, average="macro", zero_division=0))
 
     per_class_f1_vals = f1_score(y_true, y_pred, labels=all_classes, average=None, zero_division=0)
+    per_class_recall_vals = recall_score(y_true, y_pred, labels=all_classes, average=None, zero_division=0)
+    per_class_precision_vals = precision_score(y_true, y_pred, labels=all_classes, average=None, zero_division=0)
     if label_names is None:
         label_names = [str(i) for i in range(n_classes)]
-    per_class_f1 = {
-        label_names[i]: float(per_class_f1_vals[i])
-        for i in range(min(len(label_names), len(per_class_f1_vals)))
-    }
+    n = min(len(label_names), len(per_class_f1_vals))
+    per_class_f1 = {label_names[i]: float(per_class_f1_vals[i]) for i in range(n)}
+    per_class_recall = {label_names[i]: float(per_class_recall_vals[i]) for i in range(n)}
+    per_class_precision = {label_names[i]: float(per_class_precision_vals[i]) for i in range(n)}
 
     cm = confusion_matrix(y_true, y_pred, labels=all_classes)
 
@@ -58,6 +61,8 @@ def compute_metrics(
         "weighted_f1": weighted_f1,
         "uar": uar,
         "per_class_f1": per_class_f1,
+        "per_class_recall": per_class_recall,
+        "per_class_precision": per_class_precision,
         "confusion_matrix": cm,
     }
 
