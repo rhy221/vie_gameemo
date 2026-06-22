@@ -1,21 +1,23 @@
-# Vie-GameEmo Annotation Guideline (`gaming_9`)
+# Vie-GameEmo Annotation Guideline (`gaming_8`)
 
-**Schema:** `gaming_9` — 9 nhãn cảm xúc phù hợp livestream game / Vietnamese game-streaming livestreams.
-**Version:** 1.0 (2026-05)
-**Áp dụng cho / Applies to:** clip 15–30 giây, có / không có webcam streamer.
+**Schema:** `gaming_8` — 8 nhãn cảm xúc phù hợp livestream game / Vietnamese game-streaming livestreams.
+**Version:** 1.1 (2026-05)
+**Áp dụng cho / Applies to:** clip ~5 giây, có / không có webcam streamer.
+
+> **Thay đổi từ v1.0:** Bỏ nhãn `focus` — các clip tryhard/concentration không biểu cảm rõ ràng được gán `neutral`. Cập nhật clip duration ~5 giây.
 
 ---
 
 ## 0. Quy ước chung / General Conventions
 
 **VI.**
-- Mỗi clip nhận **đúng một** nhãn — cảm xúc *chủ đạo* trong cửa sổ ±2 giây quanh **peak frame** (frame có AU intensity cao nhất, xem `peak_frame.py`).
+- Mỗi clip nhận **đúng một** nhãn — cảm xúc *chủ đạo* trong cửa sổ ±1.5 giây quanh **peak frame** (frame có AU intensity cao nhất, xem `peak_frame.py`).
 - Đối với clip có nhiều cảm xúc chuyển tiếp nhanh (ví dụ shocked → amused), chọn cảm xúc **chiếm thời lượng dài nhất** trong clip; nếu hòa nhau, ưu tiên cảm xúc tại peak frame.
 - Khi không chắc chắn, dùng **decision tree** ở §3. Không bao giờ gán `neutral` chỉ để "an toàn" — `neutral` có định nghĩa riêng (§1.1).
 - Annotator độc lập gán nhãn, sau đó tính Cohen's κ. Yêu cầu κ ≥ 0.6 trước khi đưa clip vào dataset.
 
 **EN.**
-- Each clip receives **exactly one** label — the *dominant* emotion in the ±2 s window around the **peak frame** (frame with highest AU intensity, see `peak_frame.py`).
+- Each clip receives **exactly one** label — the *dominant* emotion in the ±1.5 s window around the **peak frame** (frame with highest AU intensity, see `peak_frame.py`).
 - For clips with rapid emotion transitions (e.g., shocked → amused), pick the emotion with the **longest duration** in the clip; ties go to the peak frame.
 - When unsure, use the **decision tree** in §3. Never pick `neutral` as a "safe default" — it has a specific definition (§1.1).
 - Two annotators label independently, then Cohen's κ is computed. Require κ ≥ 0.6 before including a clip in the dataset.
@@ -30,50 +32,32 @@
 
 ## 1. Định nghĩa nhãn / Label Definitions
 
-> Order = class index (0..8). Phải khớp với `EmotionLabel` enum trong `src/vie_gameemo/data/schemas.py`.
+> Order = class index (0..7). Phải khớp với `EmotionLabel` enum trong `src/vie_gameemo/data/schemas.py`.
 
 ### 1.1 `neutral` (idx 0) — *Trung tính / Baseline*
 
 **VI.**
-Trạng thái nền: streamer giải thích cơ chế game, đọc chat, chờ matchmaking, hoặc thao tác bình thường mà không có phản ứng cảm xúc rõ rệt.
-- **Khuôn mặt:** AU intensity thấp toàn bộ (max AU < 1.0); mắt mở bình thường (AU45 không kích hoạt mạnh).
+Trạng thái nền: streamer giải thích cơ chế game, đọc chat, chờ matchmaking, thao tác bình thường, hoặc **tập trung im lặng** (tryhard không kèm biểu cảm rõ ràng).
+- **Khuôn mặt:** AU intensity thấp toàn bộ (max AU < 1.0); mắt mở bình thường (AU45 không kích hoạt mạnh). AU4 có thể nhích nhẹ khi tập trung nhưng không nổi bật.
 - **Giọng:** pitch trung bình, năng lượng đều, tốc độ nói bình thường, không có tiếng cười/hét/im lặng đột ngột.
-- **Transcript:** câu mô tả/giải thích ("ờ thì cái này…", "build này là…"), không có exclamation.
-- **Game context:** không có sự kiện kích thích (match đang chờ, đang đi tới objective, đang xem chat).
+- **Transcript:** câu mô tả/giải thích ("ờ thì cái này…", "build này là…"), command ngắn không kèm cảm xúc ("đi", "lùi", "ok ok"), không có exclamation.
+- **Game context:** không có sự kiện kích thích (match đang chờ, đang đi tới objective, đang xem chat, đang tryhard không phản ứng).
 
 **EN.**
-Baseline state: the streamer is explaining game mechanics, reading chat, waiting for matchmaking, or performing normal actions without a clear affective response.
-- **Face:** low AU intensity overall (max AU < 1.0); eyes normally open (AU45 not strongly activated).
+Baseline state: the streamer is explaining game mechanics, reading chat, waiting for matchmaking, performing normal actions, or **silently concentrating** (tryhard with no visible affect).
+- **Face:** low AU intensity overall (max AU < 1.0); eyes normally open (AU45 not strongly activated). AU4 may be slightly active during concentration but not prominent.
 - **Voice:** medium pitch, even energy, normal pace; no laughter, shouting, or sudden silence.
-- **Transcript:** explanatory or descriptive sentences ("uhm, the thing is…", "this build is…"), no exclamations.
-- **Game context:** no stimulating event (lobby, traveling to objective, reading chat).
+- **Transcript:** explanatory or descriptive sentences ("uhm, the thing is…", "this build is…"), short commands without affect ("go", "ok ok"), no exclamations.
+- **Game context:** no stimulating event (lobby, traveling to objective, reading chat, tryhard with no emotional reaction).
 
 ✅ **Positive example:** Streamer giải thích build cho người mới, giọng đều, AU đều thấp.
+✅ **Positive example:** Streamer im lặng, nhìn màn hình, chơi ranked — AU4 nhích nhẹ nhưng không có biểu cảm rõ.
 ❌ **Negative example:** Streamer "cười nhẹ" khi nói chuyện → đó là `amused`, không phải `neutral`.
+❌ **Negative example:** Streamer im lặng nhưng mặt **rõ ràng bực bội** (AU4 rất cao, AU23/24) → `tilted`.
 
 ---
 
-### 1.2 `focus` (idx 1) — *Tập trung cao độ / Concentration*
-
-**VI.**
-Trạng thái tập trung khi gameplay căng (tryhard moment): clutch 1vN, boss phase, ranked promotion, speedrun.
-- **Khuôn mặt:** AU4 (cau mày) **trung-cao**, AU7 (mí dưới căng); miệng mím (AU24); ít AU "cảm xúc" khác.
-- **Giọng:** giảm âm lượng, nói ngắn/im lặng, thở dài, đôi khi tự nói nhỏ ("ok ok ok", "tập trung").
-- **Transcript:** rất ít từ, hoặc command ngắn ("đi", "lùi", "ulti đi"), không có slang vui.
-- **Game context:** tình huống cao stakes (HP thấp, ranked, boss DPS check, kẻ thù gần).
-
-**EN.**
-Concentration state during tryhard moments: 1vN clutch, boss phase, ranked promo, speedrun.
-- **Face:** AU4 (brow lowerer) **medium-high**, AU7 (lid tightener); lips pressed (AU24); few other "affect" AUs.
-- **Voice:** reduced volume, terse speech or silence, deep breaths, occasional self-talk ("ok ok ok", "focus").
-- **Transcript:** very few words, or short commands ("go", "back", "ult"), no fun slang.
-- **Game context:** high-stakes situation (low HP, ranked, boss DPS check, enemy nearby).
-
-⚠️ **Phân biệt với `tilted` / Disambiguation from `tilted`:** focus = quiet intensity; tilted = audible anger/frustration. Nếu có chửi thề, hét bực → `tilted`.
-
----
-
-### 1.3 `hype` (idx 2) — *Phấn khích / Adrenaline rush*
+### 1.2 `hype` (idx 1) — *Phấn khích / Adrenaline rush*
 
 **VI.**
 Bùng nổ năng lượng tích cực: clutch thành công, ace, pentakill, victory royale, jump-scare survived, level-up clutch.
@@ -94,7 +78,7 @@ Positive energy burst: clutch win, ace, pentakill, victory royale, surviving a j
 
 ---
 
-### 1.4 `amused` (idx 3) — *Vui thích / Laughter*
+### 1.3 `amused` (idx 2) — *Vui thích / Laughter*
 
 **VI.**
 Vui vẻ, cười (không bùng nổ): nghe joke, gặp bug funny, teammate troll, fail hài.
@@ -114,7 +98,7 @@ Joy / laughter (not explosive): hearing a joke, finding a funny bug, teammate tr
 
 ---
 
-### 1.5 `tilted` (idx 4) — *Tức giận / Anger, frustration*
+### 1.4 `tilted` (idx 3) — *Tức giận / Anger, frustration*
 
 **VI.**
 Bực bội, tức giận do thua/lag/team kém: ragequit, chửi teammate, đập bàn, complain.
@@ -132,10 +116,11 @@ Anger, frustration from losing/lag/bad team: ragequit, flaming teammates, table-
 
 ⚠️ **vs `hype`:** Cả hai đều shout. Khác biệt là **valence**: hype = positive (win), tilted = negative (loss/lag). Đọc transcript + game context để quyết định.
 ⚠️ **vs `sad`:** tilted = explosive anger; sad = quiet resignation. Nếu im lặng và "ờ thua rồi" → `sad`.
+⚠️ **vs `neutral`:** tilted im lặng (silent rage) vẫn phân biệt được qua AU4 **rất cao** + AU23/24 + game context loss. Nếu AU4 nhẹ + không có loss event → `neutral`.
 
 ---
 
-### 1.6 `sad` (idx 5) — *Buồn / Sadness, regret*
+### 1.5 `sad` (idx 4) — *Buồn / Sadness, regret*
 
 **VI.**
 Buồn, thất vọng nhẹ, hối tiếc: thua match căng nhưng không hề nổi nóng, mất item rare, nhân vật game chết (storyline), kết thúc series buồn.
@@ -155,7 +140,7 @@ Sadness, mild disappointment, regret: losing a tight match without rage, losing 
 
 ---
 
-### 1.7 `shocked` (idx 6) — *Sốc / Surprise*
+### 1.6 `shocked` (idx 5) — *Sốc / Surprise*
 
 **VI.**
 Bất ngờ ngắn (1-3 giây): teammate clutch bất ngờ, kill outplay, jump-scare nhẹ, plot twist, "wait what?".
@@ -176,7 +161,7 @@ Brief surprise (1-3 s): unexpected teammate clutch, kill outplay, mild jump-scar
 
 ---
 
-### 1.8 `fear` (idx 7) — *Sợ hãi / Fear, panic*
+### 1.7 `fear` (idx 6) — *Sợ hãi / Fear, panic*
 
 **VI.**
 Sợ hãi rõ rệt (chủ yếu game horror, survival, jump-scare mạnh): Resident Evil, Phasmophobia, Outlast, ARMA night ops.
@@ -198,7 +183,7 @@ Pronounced fear (mostly horror, survival, hard jump-scares): Resident Evil, Phas
 
 ---
 
-### 1.9 `disgusted` (idx 8) — *Ghê tởm / Disgust, contempt, cringe*
+### 1.8 `disgusted` (idx 7) — *Ghê tởm / Disgust, contempt, cringe*
 
 **VI.**
 Ghê tởm hoặc khinh thường: gore quá đáng, nhân vật xấu, content cringe, teammate chơi tệ đến mức "ngao ngán", ý kiến viewer toxic.
@@ -221,38 +206,39 @@ Disgust, contempt, or cringe: excessive gore, ugly characters, cringe content, t
 
 ## 2. Phân bổ mục tiêu / Target Distribution
 
-**VI.** Mục tiêu 600 clip, cân bằng theo tier hiếm hiếm-thường:
+**VI.** Mục tiêu 600 clip, cân bằng theo tier hiếm-thường:
 
-| # | Nhãn       | %    | Clips | Tier        | Ghi chú thu thập                              |
-|---|------------|------|-------|-------------|----------------------------------------------|
-| 0 | neutral    | 14%  | 84    | common      | Lobby, đọc chat, giải thích build           |
-| 1 | focus      | 13%  | 78    | common      | Ranked, clutch không hét, boss DPS check    |
-| 2 | hype       | 13%  | 78    | common      | Win clip, ace, pentakill (chủ yếu MOBA/FPS) |
-| 3 | amused     | 11%  | 66    | medium      | Funny moments, troll, bug clip               |
-| 4 | tilted     | 11%  | 66    | medium      | Ragequit, flame, lag complaint               |
-| 5 | sad        | 10%  | 60    | medium      | Mất rank, ending buồn, mất item rare         |
-| 6 | shocked    | 11%  | 66    | medium      | Plot twist, unexpected clutch, sniper kill   |
-| 7 | fear       | 9%   | 54    | rare        | **Tăng share game horror lên ≥ 18%**         |
-| 8 | disgusted  | 8%   | 48    | rare        | Gore, cringe, body horror, toxic comments    |
+| # | Nhãn       | %    | Clips | Tier        | Ghi chú thu thập                                     |
+|---|------------|------|-------|-------------|------------------------------------------------------|
+| 0 | neutral    | 20%  | 120   | common      | Lobby, đọc chat, giải thích build, tryhard im lặng  |
+| 1 | hype       | 15%  | 90    | common      | Win clip, ace, pentakill (chủ yếu MOBA/FPS)          |
+| 2 | amused     | 13%  | 78    | common      | Funny moments, troll, bug clip                        |
+| 3 | tilted     | 13%  | 78    | medium      | Ragequit, flame, lag complaint                        |
+| 4 | sad        | 11%  | 66    | medium      | Mất rank, ending buồn, mất item rare                 |
+| 5 | shocked    | 12%  | 72    | medium      | Plot twist, unexpected clutch, sniper kill            |
+| 6 | fear       | 9%   | 54    | rare        | **Tăng share game horror lên ≥ 18%**                 |
+| 7 | disgusted  | 7%   | 42    | rare        | Gore, cringe, body horror, toxic comments             |
+|   | **Total**  | **100%** | **600** | | |
 
 **EN.** Target 600 clips, balanced by rarity tier:
 
-| # | Label      | %    | Clips | Tier   | Sourcing note                                |
-|---|------------|------|-------|--------|---------------------------------------------|
-| 0 | neutral    | 14%  | 84    | common | Lobby, reading chat, build explanations     |
-| 1 | focus      | 13%  | 78    | common | Ranked, silent clutch, boss DPS check        |
-| 2 | hype       | 13%  | 78    | common | Win clips, ace, pentakill (mainly MOBA/FPS)  |
-| 3 | amused     | 11%  | 66    | medium | Funny moments, trolls, bug clips             |
-| 4 | tilted     | 11%  | 66    | medium | Ragequit, flame, lag complaints              |
-| 5 | sad        | 10%  | 60    | medium | Rank loss, sad ending, lost rare item        |
-| 6 | shocked    | 11%  | 66    | medium | Plot twist, unexpected clutch, sniper kill   |
-| 7 | fear       | 9%   | 54    | rare   | **Raise horror genre share to ≥ 18%**        |
-| 8 | disgusted  | 8%   | 48    | rare   | Gore, cringe, body horror, toxic comments    |
+| # | Label      | %    | Clips | Tier   | Sourcing note                                        |
+|---|------------|------|-------|--------|------------------------------------------------------|
+| 0 | neutral    | 20%  | 120   | common | Lobby, reading chat, build explanations, silent tryhard |
+| 1 | hype       | 15%  | 90    | common | Win clips, ace, pentakill (mainly MOBA/FPS)           |
+| 2 | amused     | 13%  | 78    | common | Funny moments, trolls, bug clips                      |
+| 3 | tilted     | 13%  | 78    | medium | Ragequit, flame, lag complaints                       |
+| 4 | sad        | 11%  | 66    | medium | Rank loss, sad ending, lost rare item                 |
+| 5 | shocked    | 12%  | 72    | medium | Plot twist, unexpected clutch, sniper kill            |
+| 6 | fear       | 9%   | 54    | rare   | **Raise horror genre share to ≥ 18%**                 |
+| 7 | disgusted  | 7%   | 42    | rare   | Gore, cringe, body horror, toxic comments             |
+|   | **Total**  | **100%** | **600** | | |
 
 **Genre rebalance for fear/disgusted:**
 - Horror genre share trong `config.yaml: data.genre_distribution.horror` nên ở mức **≥ 15%** (hiện tại) hoặc tăng lên **18-20%** nếu thấy fear/disgusted không đủ.
 - RPG genre có thể đóng góp `sad` (storyline) và `disgusted` (gore).
 - Mobile / casual hiếm có fear/disgusted → tập trung crawl cho 6 nhãn còn lại.
+- **neutral tăng lên 20%** để bao gồm cả các clip tryhard/concentration trước đây được gán `focus`.
 
 ---
 
@@ -279,17 +265,18 @@ Bắt đầu / Start:
 │       │       ├─ AU9/AU10 active (nose wrinkle / lip raise)?
 │       │       │   ├─ Yes → DISGUSTED
 │       │       │   └─ No:
-│       │       │       ├─ AU4 high + AU24 lip press + quiet + high-stakes?
-│       │       │       │   ├─ Yes → FOCUS
+│       │       │       ├─ AU1+AU4 + AU15 (sad combo) + low pitch?
+│       │       │       │   ├─ Yes → SAD
 │       │       │       │   └─ No:
-│       │       │       │       ├─ AU1+AU4 + AU15 (sad combo) + low pitch?
-│       │       │       │       │   ├─ Yes → SAD
+│       │       │       │       ├─ AU4 rất cao + AU23/24 + loss event (không shout)?
+│       │       │       │       │   ├─ Yes → TILTED (silent rage)
 │       │       │       │       │   └─ No → NEUTRAL
 ```
 
 **Lưu ý quan trọng / Important:**
 - Decision tree là **gợi ý**, không bắt buộc. Luôn đối chiếu với **3+ modality** trước khi quyết định.
 - Nếu sau khi đi qua tree vẫn không chắc → mark `_uncertain` và đưa lên human review queue.
+- **Tryhard/concentration clips** (trước đây là `focus`) → mặc định gán `neutral` trừ khi có biểu cảm rõ.
 
 ---
 
@@ -339,7 +326,7 @@ Bắt đầu / Start:
 | feed            | bị giết quá nhiều                        | tilted / sad          |
 | throw           | làm hỏng game                            | tilted                |
 | tilted          | bực, mất tập trung                       | tilted                |
-| sweaty / tryhard| chơi quá nghiêm túc                      | focus                 |
+| sweaty / tryhard| chơi quá nghiêm túc                      | neutral               |
 | jump-scare      | hù bất ngờ (horror)                      | fear / shocked        |
 | cringe          | ngại / sởn da                            | disgusted             |
 | salty           | cay cú sau thua                          | tilted / sad          |
@@ -371,11 +358,11 @@ Bắt đầu / Start:
 ## 7. Liên kết / References
 
 - Schema enum: `src/vie_gameemo/data/schemas.py` → `class EmotionLabel`.
-- Config: `config.yaml` → `labeling.schemas.gaming_9`, `labeling.class_distribution`.
+- Config: `config.yaml` → `labeling.schemas.gaming_8`, `labeling.class_distribution`.
 - Peak frame logic: `src/vie_gameemo/data/annotator/peak_frame.py`.
 - AU reference: Facial Action Coding System (FACS), Ekman & Friesen (1978).
 - OpenFace AU keys: AU01, AU02, AU04, AU05, AU06, AU07, AU09, AU10, AU12, AU14, AU15, AU17, AU20, AU23, AU24, AU25, AU26, AU45.
 
 ---
 
-*Version 1.0 — 2026-05. Refine after pilot batch; bump version on any rule change so cached annotations can be re-validated.*
+*Version 1.1 — 2026-05. Removed `focus` label (merged into `neutral`; tryhard/concentration clips → neutral). Clip duration updated to ~5 giây. Bump version on any rule change so cached annotations can be re-validated.*

@@ -35,7 +35,7 @@ from vie_gameemo.utils.seed import set_seed
 
 logger = logging.getLogger(__name__)
 
-_EMOTION_LABELS = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
+_EMOTION_LABELS = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 _LABEL2IDX = {l: i for i, l in enumerate(_EMOTION_LABELS)}
 
 

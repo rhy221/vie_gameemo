@@ -5,28 +5,29 @@ stages. Annotations are serialized as JSON on disk; these models provide
 validation and IDE autocomplete.
 """
 
+import json
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, field_validator, model_validator
 
 
 class EmotionLabel(str, Enum):
-    """Gaming-specific emotion labels (primary schema, `gaming_9`).
+    """Gaming-specific emotion labels (primary schema, `gaming_8`).
 
-    Class index = declaration order (0..8). Do not reorder without rebuilding
+    Class index = declaration order (0..7). Do not reorder without rebuilding
     cached features and checkpoints. See `docs/annotation_guideline.md`.
     """
-    NEUTRAL = "neutral"        # 0 — baseline / idle / explanatory
-    FOCUS = "focus"            # 1 — tryhard, intense concentration
-    HYPE = "hype"              # 2 — clutch, ace, victory adrenaline
-    AMUSED = "amused"          # 3 — laughter, funny moment
-    TILTED = "tilted"          # 4 — anger, frustration, ragequit
-    SAD = "sad"                # 5 — loss, regret, disappointment
-    SHOCKED = "shocked"        # 6 — surprise (positive or negative)
-    FEAR = "fear"              # 7 — horror, jump-scare, panic
-    DISGUSTED = "disgusted"    # 8 — revulsion, cringe, contempt
+    NEUTRAL = "neutral"        # 0 — baseline / idle / explanatory / silent tryhard
+    HYPE = "hype"              # 1 — clutch, ace, victory adrenaline
+    AMUSED = "amused"          # 2 — laughter, funny moment
+    TILTED = "tilted"          # 3 — anger, frustration, ragequit
+    SAD = "sad"                # 4 — loss, regret, disappointment
+    SHOCKED = "shocked"        # 5 — surprise (positive or negative)
+    FEAR = "fear"              # 6 — horror, jump-scare, panic
+    DISGUSTED = "disgusted"    # 7 — revulsion, cringe, contempt
 
 
 class EkmanLabel(str, Enum):
@@ -127,6 +128,11 @@ class Annotation(BaseModel):
     human_reviewer: str | None = None
     cohens_kappa: float | None = None
     code_switching_ratio: float = 0.0
+    source_language: Literal["vi", "en"] = "vi"
+    asr_detected_language: str | None = None
+    text_detected_language: str | None = None
+    language_detect_confidence: float | None = None
+    language_mismatch: bool = False
     created_at: datetime
 
     def save(self, path: Path) -> None:
@@ -187,7 +193,11 @@ class MultimodalFeatures(BaseModel):
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        data = self.model_dump(mode="python")
+        for k in ("h_audio_path", "h_face_path", "h_context_path", "h_text_path"):
+            data[k] = str(data[k])
+        data["extracted_at"] = data["extracted_at"].isoformat()
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     @classmethod
     def load(cls, path: Path) -> "MultimodalFeatures":
@@ -205,4 +215,5 @@ class MultimodalFeatures(BaseModel):
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Features metadata not found: {path}")
-        return cls.model_validate_json(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return cls.model_validate(data)

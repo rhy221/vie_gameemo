@@ -1,0 +1,70 @@
+# =============================================================================
+# Language-handling ablation configs (A1–A5)
+# Switch via: python scripts/train.py --experiment ablation_language --variant A2
+# =============================================================================
+
+# A1: VI-only (CafeBERT or PhoBERT, no EN data)
+A1:
+  description: "VI-only baseline (no EN data)"
+  text_encoder:
+    backend: "cafebert"
+    model: "uitnlp/CafeBERT"
+    freeze: false
+  data:
+    filter_language: "vi"
+  text_mode: "original"
+
+# A2: Mixed multilingual, no translate (PROPOSED DEFAULT)
+A2:
+  description: "Mixed VI+EN, multilingual encoder, no translation"
+  text_encoder:
+    backend: "cafebert"
+    model: "uitnlp/CafeBERT"
+    freeze: false
+  data:
+    filter_language: null  # use all
+  text_mode: "original"
+
+# A3: Mixed + language-adversarial head (NOVELTY)
+A3:
+  description: "Mixed VI+EN + language-adversarial head (GRL)"
+  text_encoder:
+    backend: "cafebert"
+    model: "uitnlp/CafeBERT"
+    freeze: false
+    language_adversarial:
+      enabled: true
+      lambda_grl: 0.1
+  data:
+    filter_language: null
+  text_mode: "original"
+
+# A4: Translate EN→VI (NLLB-200) → PhoBERT
+A4:
+  description: "Translate all EN→VI via NLLB-200, encode with PhoBERT"
+  text_encoder:
+    backend: "phobert"
+    model: "vinai/phobert-base-v2"
+    freeze: false
+  data:
+    filter_language: null
+  text_mode: "translate_vi"
+  translation:
+    model: "facebook/nllb-200-distilled-1.3B"
+    source_lang: "eng_Latn"
+    target_lang: "vie_Latn"
+
+# A5: Translate all→EN → English emotion model
+A5:
+  description: "Translate all→EN, use English-only encoder"
+  text_encoder:
+    backend: "xlmr-base"
+    model: "FacebookAI/xlm-roberta-base"
+    freeze: false
+  data:
+    filter_language: null
+  text_mode: "translate_en"
+  translation:
+    model: "facebook/nllb-200-distilled-1.3B"
+    source_lang: "vie_Latn"
+    target_lang: "eng_Latn"

@@ -61,6 +61,7 @@ def get_fusion(name: str, **kwargs) -> nn.Module:
 
 def _ensure_registered() -> None:
     """Import fusion modules if not yet registered."""
-    if not _FUSION_REGISTRY:
-        from vie_gameemo.fusion import conv_attention  # noqa: F401
+    if "late" not in _FUSION_REGISTRY:
         from vie_gameemo.fusion import baselines       # noqa: F401
+    if "conv_attention_4m" not in _FUSION_REGISTRY:
+        from vie_gameemo.fusion import conv_attention  # noqa: F401

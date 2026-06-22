@@ -1,10 +1,11 @@
-"""Text encoder using XLM-RoBERTa-base.
+"""Text encoder with multiple backend support.
 
-Multilingual encoder that handles Vietnamese + English gaming slang
-code-switching natively. PhoBERT is also a strong VN baseline, but XLM-R
-handles code-switching better out of the box.
+Default: CafeBERT (XLM-R-large + pretrained on Vietnamese, SOTA on VLUE).
+Fallback: xlmr-base if T4 VRAM constrained.
+Options: xlmr-large, xlm-emo (emotion-pretrain), mE5-frozen, phobert (VI-only).
 
-Output: token sequence (B, T, 768) where T depends on pooling.
+Output: token sequence (B, T, D) where T depends on pooling, D depends on model.
+All backends share the same encode()/encode_batch() interface.
 """
 
 import logging
@@ -15,56 +16,60 @@ from transformers import AutoModel, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
+_BACKEND_MODELS = {
+    "cafebert": "uitnlp/CafeBERT",
+    "xlmr-large": "FacebookAI/xlm-roberta-large",
+    "xlmr-base": "FacebookAI/xlm-roberta-base",
+    "xlm-emo": "MilaNLProc/xlm-emo-t",
+    "mE5-frozen": "intfloat/multilingual-e5-large",
+}
+
 
 class XLMRTextEncoder(nn.Module):
-    """XLM-RoBERTa encoder for multilingual transcript embedding."""
+    """Multilingual text encoder (XLM-R family, CafeBERT, mE5)."""
 
     def __init__(
         self,
-        model_name: str = "FacebookAI/xlm-roberta-base",
+        model_name: str = "uitnlp/CafeBERT",
         max_length: int = 128,
         pooling: str = "cls",
+        freeze: bool = False,
         device: str | torch.device = "cuda",
+        normalize: bool = False,
     ) -> None:
-        """Initialize text encoder.
-
-        Args:
-            model_name: HF model ID.
-            max_length: Max token length (truncate longer).
-            pooling: 'cls' (T=1) | 'mean' (T=1) | 'none' (T=seq_len).
-            device: Torch device.
-        """
         super().__init__()
         self.model_name = model_name
         self.max_length = max_length
         self.pooling = pooling
+        self.freeze = freeze
         self.device = torch.device(device)
+        self.normalize = normalize
 
-        logger.info("Loading XLM-RoBERTa: %s", model_name)
+        logger.info("Loading text encoder: %s", model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
-        self.model.eval()
-        for p in self.model.parameters():
-            p.requires_grad = False
+
+        if freeze:
+            self.model.eval()
+            for p in self.model.parameters():
+                p.requires_grad = False
+            logger.info("Text encoder frozen")
+        else:
+            logger.info("Text encoder trainable (fine-tune)")
+
+        self.d_model = self.model.config.hidden_size
         self.model = self.model.to(self.device)
-        logger.info("Text encoder loaded and frozen")
 
     @torch.no_grad()
     def encode(self, text: str) -> Tensor:
         """Encode a single transcript.
 
-        Args:
-            text: Transcript string (may contain Vietnamese + English mix).
-                Empty string returns zero tensor.
-
         Returns:
-            Tensor of shape (1, T, 768):
-                - T=1 for cls/mean pooling
-                - T=seq_len for pooling='none'
+            Tensor of shape (1, T, D): T=1 for cls/mean, T=seq_len for none.
         """
         if not text.strip():
             T = 1 if self.pooling in ("cls", "mean") else self.max_length
-            return torch.zeros(1, T, 768, device=self.device)
+            return torch.zeros(1, T, self.d_model, device=self.device)
 
         inputs = self.tokenizer(
             text,
@@ -75,21 +80,21 @@ class XLMRTextEncoder(nn.Module):
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         outputs = self.model(**inputs)
-        hidden = outputs.last_hidden_state  # (1, seq_len, 768)
-        return self._pool(hidden)
+        hidden = outputs.last_hidden_state
+        pooled = self._pool(hidden)
+        if self.normalize:
+            pooled = nn.functional.normalize(pooled, p=2, dim=-1)
+        return pooled
 
     @torch.no_grad()
     def encode_batch(self, texts: list[str]) -> Tensor:
         """Batch encode transcripts with padding.
 
-        Args:
-            texts: List of transcript strings.
-
         Returns:
-            Tensor of shape (B, T, 768).
+            Tensor of shape (B, T, D).
         """
         if not texts:
-            return torch.zeros(0, 1, 768, device=self.device)
+            return torch.zeros(0, 1, self.d_model, device=self.device)
 
         inputs = self.tokenizer(
             texts,
@@ -100,24 +105,32 @@ class XLMRTextEncoder(nn.Module):
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         outputs = self.model(**inputs)
-        hidden = outputs.last_hidden_state  # (B, seq_len, 768)
-        return self._pool(hidden)
+        hidden = outputs.last_hidden_state
+        pooled = self._pool(hidden)
+        if self.normalize:
+            pooled = nn.functional.normalize(pooled, p=2, dim=-1)
+        return pooled
 
-    def _pool(self, hidden: Tensor) -> Tensor:
-        """Apply configured pooling to hidden states.
-
-        Args:
-            hidden: (B, seq_len, 768).
+    def forward(self, input_ids: Tensor, attention_mask: Tensor | None = None) -> Tensor:
+        """Forward pass for training (when not frozen).
 
         Returns:
-            (B, T, 768) pooled tensor.
+            (B, T, D) pooled hidden states.
         """
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        hidden = outputs.last_hidden_state
+        pooled = self._pool(hidden)
+        if self.normalize:
+            pooled = nn.functional.normalize(pooled, p=2, dim=-1)
+        return pooled
+
+    def _pool(self, hidden: Tensor) -> Tensor:
         if self.pooling == "cls":
-            return hidden[:, :1, :]  # CLS token → (B, 1, 768)
+            return hidden[:, :1, :]
         elif self.pooling == "mean":
-            return hidden.mean(dim=1, keepdim=True)  # (B, 1, 768)
+            return hidden.mean(dim=1, keepdim=True)
         else:
-            return hidden  # (B, seq_len, 768)
+            return hidden
 
 
 # ---------------------------------------------------------------------------
@@ -125,34 +138,78 @@ class XLMRTextEncoder(nn.Module):
 # ---------------------------------------------------------------------------
 
 def build_text_encoder(encoder_cfg) -> nn.Module:
-    """Build XLMRTextEncoder or PhoBERTTextEncoder from config.
+    """Build text encoder from config.
+
+    Supports backends: cafebert, xlmr-large, xlmr-base, xlm-emo,
+    mE5-frozen, phobert.
 
     Args:
         encoder_cfg: cfg.text_encoder (SimpleNamespace).
-            .type:   "xlmr" | "phobert"
-            .xlmr:   sub-namespace with model_name, max_length, pooling
-            .phobert: sub-namespace with model_name, max_length, pooling
 
     Returns:
-        Frozen encoder instance (not yet moved to target device).
-        Caller should call .to(device) after this function.
+        Encoder instance (on CPU — caller moves to device).
     """
-    enc_type = getattr(encoder_cfg, "type", "xlmr")
+    backend = getattr(encoder_cfg, "backend", getattr(encoder_cfg, "type", "cafebert"))
+    freeze = getattr(encoder_cfg, "freeze", False)
+    max_length = getattr(encoder_cfg, "max_length", 128)
+    pooling = getattr(encoder_cfg, "pooling", "cls")
 
-    if enc_type == "phobert":
+    if backend == "phobert":
         from vie_gameemo.encoders.text_phobert import PhoBERTTextEncoder
         ph = getattr(encoder_cfg, "phobert", encoder_cfg)
-        logger.info("Text encoder: PhoBERT (%s)", getattr(ph, "model_name", "vinai/phobert-base-v2"))
+        model_name = getattr(ph, "model_name", "vinai/phobert-base-v2")
+        logger.info("Text encoder: PhoBERT (%s)", model_name)
         return PhoBERTTextEncoder(
-            model_name=getattr(ph, "model_name", "vinai/phobert-base-v2"),
-            max_length=getattr(ph, "max_length", 128),
-            pooling=getattr(ph, "pooling", "cls"),
+            model_name=model_name,
+            max_length=max_length,
+            pooling=pooling,
         )
-    else:
-        x = getattr(encoder_cfg, "xlmr", encoder_cfg)
-        logger.info("Text encoder: XLM-R (%s)", getattr(x, "model_name", "FacebookAI/xlm-roberta-base"))
-        return XLMRTextEncoder(
-            model_name=getattr(x, "model_name", "FacebookAI/xlm-roberta-base"),
-            max_length=getattr(x, "max_length", 128),
-            pooling=getattr(x, "pooling", "cls"),
+
+    # Resolve model name
+    model_name = getattr(encoder_cfg, "model", None)
+    if model_name is None:
+        model_name = _BACKEND_MODELS.get(backend, _BACKEND_MODELS["cafebert"])
+    backend_ns = getattr(encoder_cfg, backend.replace("-", "_"), None)
+    if backend_ns is not None:
+        model_name = getattr(backend_ns, "model_name", model_name)
+
+    # Warm-start: load weights from a different pretrained model
+    warm_start = getattr(encoder_cfg, "warm_start", "none")
+
+    normalize = backend == "mE5-frozen"
+    if backend == "mE5-frozen":
+        freeze = True
+
+    logger.info("Text encoder: %s (%s, freeze=%s)", backend, model_name, freeze)
+
+    encoder = XLMRTextEncoder(
+        model_name=model_name,
+        max_length=max_length,
+        pooling=pooling,
+        freeze=freeze,
+        device="cpu",
+        normalize=normalize,
+    )
+
+    if warm_start and warm_start != "none":
+        _apply_warm_start(encoder, warm_start)
+
+    return encoder
+
+
+def _apply_warm_start(encoder: XLMRTextEncoder, warm_start_model: str) -> None:
+    """Load compatible weights from a warm-start model (e.g., xlm-emo)."""
+    logger.info("Applying warm-start from %s", warm_start_model)
+    try:
+        warm_model = AutoModel.from_pretrained(warm_start_model)
+        missing, unexpected = encoder.model.load_state_dict(
+            warm_model.state_dict(), strict=False
         )
+        if missing:
+            logger.warning("Warm-start missing keys: %s", missing[:5])
+        if unexpected:
+            logger.warning("Warm-start unexpected keys: %s", unexpected[:5])
+        del warm_model
+        logger.info("Warm-start applied successfully")
+    except Exception as exc:
+        logger.warning("Warm-start failed: %s — continuing with base weights", exc)

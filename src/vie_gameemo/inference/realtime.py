@@ -21,7 +21,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-_EMOTION_LABELS = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
+_EMOTION_LABELS = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
 
 class RealtimeInferenceRunner:
@@ -167,13 +167,17 @@ class RealtimeInferenceRunner:
         if llm is None:
             return {"reasoning": "", "answer": window.get("label", "neutral")}
 
-        evidence = {
-            "face_aus": window.get("face_aus", "N/A"),
-            "visual_objective": window.get("visual_description", "N/A"),
-            "audio_tone": window.get("audio_description", "N/A"),
-            "transcript": window.get("transcript", ""),
-            "label": window.get("label", "neutral"),
-        }
+        fusion_emb = window.get("fusion_emb")
+        if fusion_emb is not None:
+            evidence = {"fusion_emb": fusion_emb, "label": window.get("label", "neutral")}
+        else:
+            evidence = {
+                "face_aus": window.get("face_aus", "N/A"),
+                "visual_objective": window.get("visual_description", "N/A"),
+                "audio_tone": window.get("audio_description", "N/A"),
+                "transcript": window.get("transcript", ""),
+                "label": window.get("label", "neutral"),
+            }
         llm_out = llm.reason(evidence)
         if hasattr(llm, "unload"):
             llm.unload()
@@ -190,9 +194,6 @@ class RealtimeInferenceRunner:
         end_sec: float,
     ) -> dict:
         """Extract features from a list of BGR frames and predict emotion."""
-        import io
-        import tempfile
-
         import cv2
         from PIL import Image
 
@@ -205,7 +206,8 @@ class RealtimeInferenceRunner:
         audio_tensor = self._zero_audio()
         text_tensor = self._zero_text()
 
-        prediction = self._forward(audio_tensor, face_tensor, ctx_tensor, text_tensor, has_face)
+        fused = self._compute_fused(audio_tensor, face_tensor, ctx_tensor, text_tensor, has_face)
+        prediction = self._predict_from_fused(fused)
 
         return {
             "window_id": self._window_id,
@@ -214,6 +216,7 @@ class RealtimeInferenceRunner:
             "label": prediction["label"],
             "confidence": prediction["confidence"],
             "class_scores": prediction["class_scores"],
+            "fusion_emb": fused.cpu(),  # stored for on-demand LLM reasoning
         }
 
     def _encode_faces(self, frames: list) -> tuple[torch.Tensor, bool]:
@@ -252,15 +255,15 @@ class RealtimeInferenceRunner:
         d = getattr(self.cfg.fusion, "d_model", 768)
         return torch.zeros(1, 1, d)
 
-    def _forward(
+    def _compute_fused(
         self,
         audio: torch.Tensor,
         face: torch.Tensor,
         context: torch.Tensor,
         text: torch.Tensor,
         has_face: bool,
-    ) -> dict:
-        """Run fusion + classifier."""
+    ) -> torch.Tensor:
+        """Run encoders through fusion module, return (1, T, 768) fused tensor."""
         audio = audio.to(self._device)
         face = face.to(self._device)
         context = context.to(self._device)
@@ -271,6 +274,11 @@ class RealtimeInferenceRunner:
             fused = self._fusion(audio, face, context, text, has_face=has_face_t)
             if isinstance(fused, tuple):
                 fused = fused[0]
+        return fused
+
+    def _predict_from_fused(self, fused: torch.Tensor) -> dict:
+        """Run classifier on fused tensor, return prediction dict."""
+        with torch.no_grad():
             logits = self._classifier(fused)
             probs = torch.softmax(logits, dim=-1)[0]
 

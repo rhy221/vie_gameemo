@@ -25,7 +25,7 @@ class EmotionClassifier(nn.Module):
         self,
         d_model: int = 768,
         hidden_dim: int = 256,
-        n_classes: int = 9,
+        n_classes: int = 8,
         dropout: float = 0.3,
         pool: str = "mean",
     ) -> None:

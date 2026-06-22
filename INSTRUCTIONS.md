@@ -201,10 +201,10 @@ Tạo file CSV với nhãn thủ công (từ người gán nhãn):
 clip_id,emotion_label
 streamer1_clip_001,hype
 streamer1_clip_002,tilted
-streamer2_clip_001,focus
+streamer2_clip_001,neutral
 ```
 
-Nhãn hợp lệ (schema `gaming_9`): `neutral`, `focus`, `hype`, `amused`, `tilted`, `sad`, `shocked`, `fear`, `disgusted`.
+Nhãn hợp lệ (schema `gaming_8`): `neutral`, `hype`, `amused`, `tilted`, `sad`, `shocked`, `fear`, `disgusted`.
 Xem `docs/annotation_guideline.md` để biết định nghĩa, AU đặc trưng, và quyết định khi mơ hồ.
 
 ### 4.5 Chạy pipeline gán nhãn đa tác tử (Stage 0c)

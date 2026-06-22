@@ -14,7 +14,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-_EMOTION_LABELS = ["neutral", "focus", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
+_EMOTION_LABELS = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
 
 def batch_inference(
@@ -66,7 +66,7 @@ def batch_inference(
 
             reasoning = ""
             if llm_reasoner is not None:
-                evidence = _features_to_evidence(features, clip_path, cfg)
+                evidence = _features_to_evidence(features, prediction, clip_path, cfg)
                 llm_out = llm_reasoner.reason(evidence)
                 reasoning = llm_out.reasoning
 
@@ -148,9 +148,11 @@ def _load_llm(cfg: SimpleNamespace):
         )
     elif active == "llm2":
         from vie_gameemo.llm.llm2_coreasoner import LLM2CoReasoner
+        cognition_ckpt = getattr(llm_cfg, "cognition_checkpoint", None)
         return LLM2CoReasoner(
             model_name=llm_cfg.base_model.name,
             quantization=llm_cfg.base_model.quantization,
+            modal_adapter_ckpt=Path(cognition_ckpt) if cognition_ckpt else None,
         )
     elif active == "llm3":
         from vie_gameemo.llm.llm3_vlm import LLM3VLMEndToEnd
@@ -160,9 +162,11 @@ def _load_llm(cfg: SimpleNamespace):
         )
     elif active == "llm4":
         from vie_gameemo.llm.llm4_rlvr import LLM4RLVR
+        cognition_ckpt = getattr(llm_cfg, "cognition_checkpoint", None)
         return LLM4RLVR(
             base_model=llm_cfg.base_model.name,
             quantization=llm_cfg.base_model.quantization,
+            modal_adapter_ckpt=Path(cognition_ckpt) if cognition_ckpt else None,
         )
     else:
         logger.warning("Unknown LLM setup '%s'; skipping LLM", active)
@@ -244,15 +248,38 @@ def _forward(fusion, classifier, features: dict, device: torch.device) -> dict:
         "label": _EMOTION_LABELS[pred_idx] if pred_idx < len(_EMOTION_LABELS) else str(pred_idx),
         "confidence": float(probs[pred_idx].item()),
         "class_scores": {_EMOTION_LABELS[i]: float(probs[i].item()) for i in range(len(_EMOTION_LABELS))},
+        "fusion_emb": fused.cpu(),  # (1, T, 768) — for LLM modal adapter
     }
 
 
-def _features_to_evidence(features: dict, clip_path: Path, cfg: SimpleNamespace) -> dict:
-    """Build LLM evidence dict from features and any annotation metadata."""
+def _features_to_evidence(
+    features: dict,
+    prediction: dict,
+    clip_path: Path,
+    cfg: SimpleNamespace,
+) -> dict:
+    """Build LLM evidence dict.
+
+    Uses annotation-free path (fusion_emb → ModalAdapter) when no text
+    annotation is available; falls back to text evidence when annotation
+    fields are present.
+    """
+    has_annotation = any(
+        features.get(k) not in (None, "N/A", "")
+        for k in ("face_aus", "visual_description", "audio_description")
+    )
+    fusion_emb = prediction.get("fusion_emb")
+
+    if not has_annotation and fusion_emb is not None:
+        return {
+            "fusion_emb": fusion_emb,
+            "label": prediction.get("label", "neutral"),
+        }
+
     return {
         "face_aus": features.get("face_aus", "N/A"),
         "visual_objective": features.get("visual_description", "N/A"),
         "audio_tone": features.get("audio_description", "N/A"),
         "transcript": features.get("transcript", ""),
-        "label": features.get("predicted_label", "neutral"),
+        "label": prediction.get("label", "neutral"),
     }
