@@ -60,6 +60,18 @@ class XLMRTextEncoder(nn.Module):
         self.d_model = self.model.config.hidden_size
         self.model = self.model.to(self.device)
 
+    def to(self, *args, **kwargs):  # type: ignore[override]
+        """Move module and keep self.device in sync with the model's params.
+
+        The caller (e.g. extract_features.py) builds this encoder on CPU and
+        then calls `.to(device)`. Without this override, self.device would stay
+        "cpu" while the model moves to CUDA, sending tokenized inputs to the
+        wrong device in encode()/encode_batch().
+        """
+        super().to(*args, **kwargs)
+        self.device = next(self.model.parameters()).device
+        return self
+
     @torch.no_grad()
     def encode(self, text: str) -> Tensor:
         """Encode a single transcript.
