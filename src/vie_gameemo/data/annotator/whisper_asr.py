@@ -487,6 +487,15 @@ def build_asr(asr_cfg) -> tuple:
     return asr, bartpho
 
 
+_lid_cache: dict[str, FastTextLID] = {}
+
+
+def _get_lid(model_path: str) -> FastTextLID:
+    if model_path not in _lid_cache:
+        _lid_cache[model_path] = FastTextLID(model_path=model_path)
+    return _lid_cache[model_path]
+
+
 def transcribe_clip(
     asr: WhisperASR | PhoWhisperASR,
     bartpho: BARTphoPostProcessor | None,
@@ -553,7 +562,7 @@ def transcribe_clip(
         try:
             text_lid_cfg = getattr(asr_cfg, "text_lid", None) if asr_cfg else None
             model_path = getattr(text_lid_cfg, "model", "lid.176.ftz") if text_lid_cfg else "lid.176.ftz"
-            lid = FastTextLID(model_path=model_path)
+            lid = _get_lid(model_path)
             lang_code, confidence = lid.predict(result.text)
             result.text_detected_language = lang_code
             result.language_detect_confidence = confidence
