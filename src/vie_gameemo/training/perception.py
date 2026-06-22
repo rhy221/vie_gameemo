@@ -51,7 +51,7 @@ def train_perception(
         Path to best checkpoint.
     """
     from vie_gameemo.classifiers.mlp import EmotionClassifier
-    from vie_gameemo.fusion import get_fusion
+    from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.losses import FocalLoss, make_class_weights
 
     pcfg = cfg.training.perception
@@ -59,22 +59,16 @@ def train_perception(
     ccfg = cfg.classifier
 
     # Build model: fusion + classifier
-    fusion_kwargs = dict(
+    fusion = get_fusion(
+        fcfg.type,
         d_model=fcfg.d_model,
         n_modalities=fcfg.n_modalities,
         n_conv_blocks=getattr(fcfg, "n_conv_blocks", 4),
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
-    )
-    # Per-modality encoder dims (only text differs by default: 1024 for
-    # XLM-R-large/CafeBERT vs 768 for audio/visual). Pass through only when set
-    # so baseline fusions that don't accept these kwargs still work.
-    for _dim_key in ("text_dim", "audio_dim", "face_dim", "context_dim"):
-        _dim_val = getattr(fcfg, _dim_key, None)
-        if _dim_val is not None:
-            fusion_kwargs[_dim_key] = _dim_val
-    fusion = get_fusion(fcfg.type, **fusion_kwargs).to(device)
+        **modality_dim_kwargs(fcfg),
+    ).to(device)
 
     classifier = EmotionClassifier(
         d_model=fcfg.d_model,
