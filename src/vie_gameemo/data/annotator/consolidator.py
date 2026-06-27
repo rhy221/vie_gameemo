@@ -26,7 +26,7 @@ Ngôn ngữ gốc của clip: {source_language}
 
 Bằng chứng đa phương thức:
 - Khuôn mặt (Action Units): {face_aus}
-- Cảnh và bối cảnh: {visual_objective}
+- Biểu cảm/hành động streamer (webcam): {face_description}
 - Đặc điểm giọng nói: {audio_tone}
 - Lời nói (transcript): "{transcript}"
 
@@ -129,16 +129,18 @@ class Consolidator:
         audio_tone: str,
         transcript: str,
         source_language: str = "vi",
+        face_description: str = "",
     ) -> str:
         """Generate structured reasoning for one clip.
 
         Args:
             emotion_label: Ground-truth emotion (from manual annotation).
             face_aus: AU code → intensity dict.
-            visual_objective: Cvod from Qwen-VL.
+            visual_objective: Context/gameplay description from Qwen-VL.
             audio_tone: Catd from Qwen-Audio.
             transcript: Cls from Whisper.
             source_language: "vi" or "en" — passed to prompt for context.
+            face_description: Streamer face/expression description from Qwen-VL.
 
         Returns:
             Reasoning text in <think>...</think><answer>...</answer> format.
@@ -154,7 +156,7 @@ class Consolidator:
         prompt = CONSOLIDATION_PROMPT_TEMPLATE.format(
             emotion_label=emotion_label,
             face_aus=face_aus_str or "N/A",
-            visual_objective=visual_objective or "N/A",
+            face_description=face_description or "N/A",
             audio_tone=audio_tone or "N/A",
             transcript=transcript or "",
             source_language=source_language,

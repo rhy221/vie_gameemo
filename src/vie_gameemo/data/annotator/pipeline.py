@@ -92,12 +92,13 @@ def annotate_batch(
     logger.info("Phase 1 done in %.1fs", time.time() - t0)
 
     peak_frame_paths = [r["peak_frame_path"] for r in local_results]
+    webcam_crops = [r.get("face_crop") for r in local_results]
     audio_paths = [r["audio_path"] for r in local_results]
 
-    # Phase 2: Visual descriptions
+    # Phase 2: Visual descriptions from webcam region
     t0 = time.time()
-    visual_descs = _phase_visual_descriptions(peak_frame_paths, cfg)
-    logger.info("Phase 2 (VL) done in %.1fs", time.time() - t0)
+    visual_descs = _phase_visual_descriptions(webcam_crops, peak_frame_paths, cfg)
+    logger.info("Phase 2 (VL webcam) done in %.1fs", time.time() - t0)
 
     # Phase 3: Audio descriptions
     t0 = time.time()
@@ -110,7 +111,8 @@ def annotate_batch(
         {
             "emotion_label": pending_labels[i],
             "face_aus": local_results[i]["face_aus"],
-            "visual_objective": visual_descs[i],
+            "face_description": visual_descs[i],
+            "visual_objective": "",
             "audio_tone": audio_descs[i],
             "transcript": local_results[i]["transcript"],
         }
@@ -132,15 +134,16 @@ def annotate_batch(
             face_aus={str(k): float(v) for k, v in lr["peak_frame_aus"].items()},
             peak_frame_idx=lr["peak_frame_idx"],
             webcam_bbox=lr.get("webcam_bbox"),
-            visual_objective_desc=visual_descs[idx],
+            face_description=visual_descs[idx],
+            visual_objective_desc="",
             audio_tone_desc=audio_descs[idx],
             transcript=lr["transcript"],
             reasoning=reasonings[idx],
             annotators=[
                 AnnotatorAgent(agent_name="openface", model_version="2.2.0", output=""),
-                AnnotatorAgent(agent_name="qwen_vl", model_version=cfg.qwen_vl.model_name, output=visual_descs[idx]),
+                AnnotatorAgent(agent_name="qwen_vl_webcam", model_version=cfg.qwen_vl.model_name, output=visual_descs[idx]),
                 AnnotatorAgent(agent_name="qwen_audio", model_version=cfg.qwen_audio.model_name, output=audio_descs[idx]),
-                AnnotatorAgent(agent_name="whisper", model_version=cfg.whisper_asr.model_name, output=lr["transcript"]),
+                AnnotatorAgent(agent_name="whisper", model_version=getattr(cfg, 'asr', cfg).whisper.model_name if hasattr(cfg, 'asr') else "whisper", output=lr["transcript"]),
                 AnnotatorAgent(agent_name="consolidator", model_version=cfg.consolidator.model_name, output=reasonings[idx]),
             ],
             created_at=datetime.now(timezone.utc),
@@ -285,6 +288,25 @@ def _process_single_clip_local(
         except Exception as exc:
             logger.warning("ASR failed for %s: %s", clip_path.name, exc)
 
+    # Face crop from webcam region (for VLM face description)
+    face_crop = None
+    if webcam_bbox is not None and peak_frame_path.exists():
+        try:
+            import cv2
+            from vie_gameemo.preprocess.face_crop import extract_streamer_face
+            from vie_gameemo.preprocess.webcam_detector import WebcamBBox as WBBox
+            frame = cv2.imread(str(peak_frame_path))
+            if frame is not None:
+                wb = WBBox(
+                    xmin=webcam_bbox.xmin, ymin=webcam_bbox.ymin,
+                    width=webcam_bbox.width, height=webcam_bbox.height,
+                    stability_score=webcam_bbox.stability_score,
+                    edge_distance=0.0,
+                )
+                face_crop = extract_streamer_face(frame, wb, target_size=(224, 224), margin=0.2)
+        except Exception as exc:
+            logger.debug("Face crop for VLM failed: %s", exc)
+
     return {
         "peak_frame_idx": peak_idx,
         "peak_frame_path": peak_frame_path,
@@ -293,21 +315,26 @@ def _process_single_clip_local(
         "audio_path": audio_path,
         "transcript": transcript,
         "webcam_bbox": webcam_bbox,
+        "face_crop": face_crop,
     }
 
 
 def _phase_visual_descriptions(
-    peak_frames: list[Path],
+    webcam_crops: list,
+    peak_frame_paths: list[Path],
     cfg: SimpleNamespace,
 ) -> list[str]:
-    """Phase 2: Qwen2.5-VL describes each peak frame. Load → batch → unload.
+    """Phase 2: Qwen2.5-VL describes streamer from webcam region.
+
+    Uses webcam crop when available, falls back to full peak frame.
 
     Args:
-        peak_frames: Paths to peak frame images.
+        webcam_crops: List of numpy arrays (BGR) or None per clip.
+        peak_frame_paths: Fallback full-frame paths.
         cfg: Annotation config.
 
     Returns:
-        List of Vietnamese visual descriptions.
+        List of Vietnamese descriptions.
     """
     agent = QwenVLAgent(
         model_name=cfg.qwen_vl.model_name,
@@ -318,7 +345,19 @@ def _phase_visual_descriptions(
     )
     try:
         agent.load()
-        results = agent.batch_describe(peak_frames)
+        # Use webcam crop where available, fallback to peak frame
+        from PIL import Image
+        import cv2
+        images = []
+        for crop, frame_path in zip(webcam_crops, peak_frame_paths):
+            if crop is not None:
+                rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                images.append(Image.fromarray(rgb))
+            elif frame_path.exists():
+                images.append(Image.open(frame_path).convert("RGB"))
+            else:
+                images.append(None)
+        results = agent.batch_describe_images(images)
     finally:
         agent.unload()
     return results

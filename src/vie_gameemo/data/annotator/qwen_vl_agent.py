@@ -100,39 +100,92 @@ class QwenVLAgent:
             torch.cuda.empty_cache()
         logger.info("Unloaded Qwen-VL agent")
 
-    def batch_describe(self, image_paths: list[Path]) -> list[str]:
+    def batch_describe(
+        self,
+        image_paths: list[Path],
+        prompt_override: str | None = None,
+    ) -> list[str]:
         """Generate Vietnamese scene descriptions for a batch of images.
 
         Args:
-            image_paths: List of paths to images (peak frames).
+            image_paths: List of paths to images.
+            prompt_override: Use this prompt instead of self.prompt.
 
         Returns:
             List of Vietnamese description strings.
-
-        Raises:
-            RuntimeError: If model not loaded.
         """
+        from PIL import Image
+        images = []
+        for p in image_paths:
+            try:
+                images.append(Image.open(p).convert("RGB"))
+            except Exception:
+                images.append(None)
+        return self._describe_images(images, prompt_override, names=[p.name for p in image_paths])
+
+    def batch_describe_images(
+        self,
+        images: list,
+        prompt_override: str | None = None,
+    ) -> list[str]:
+        """Generate descriptions from PIL Images or numpy arrays directly.
+
+        Args:
+            images: List of PIL.Image or numpy arrays (BGR).
+            prompt_override: Use this prompt instead of self.prompt.
+
+        Returns:
+            List of Vietnamese description strings.
+        """
+        from PIL import Image
+        import numpy as np
+        pil_images = []
+        for img in images:
+            if img is None:
+                pil_images.append(None)
+            elif isinstance(img, np.ndarray):
+                import cv2
+                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                pil_images.append(Image.fromarray(rgb))
+            elif isinstance(img, Image.Image):
+                pil_images.append(img)
+            else:
+                pil_images.append(None)
+        return self._describe_images(pil_images, prompt_override)
+
+    def _describe_images(
+        self,
+        images: list,
+        prompt_override: str | None = None,
+        names: list[str] | None = None,
+    ) -> list[str]:
+        """Core description loop over PIL images."""
         if self.model is None or self.processor is None:
             raise RuntimeError("QwenVLAgent not loaded. Call load() first.")
 
         import torch
-        from PIL import Image
 
+        prompt = prompt_override or self.prompt
         descriptions: list[str] = []
-        for img_path in image_paths:
+
+        for i, image in enumerate(images):
+            name = names[i] if names else f"image_{i}"
+            if image is None:
+                descriptions.append("")
+                continue
             try:
-                image = Image.open(img_path).convert("RGB")
                 messages = [
                     {
                         "role": "user",
                         "content": [
                             {"type": "image", "image": image},
-                            {"type": "text", "text": self.prompt},
+                            {"type": "text", "text": prompt},
                         ],
                     }
                 ]
                 text_input = self.processor.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
+                    messages, tokenize=False, add_generation_prompt=True,
+                    enable_thinking=False,
                 )
                 inputs = self.processor(
                     text=[text_input],
@@ -151,10 +204,10 @@ class QwenVLAgent:
                 out_ids = generated_ids[:, inputs["input_ids"].shape[1]:]
                 text = self.processor.batch_decode(out_ids, skip_special_tokens=True)[0].strip()
                 descriptions.append(text)
-                logger.debug("VL described %s: %d chars", img_path.name, len(text))
+                logger.debug("VL described %s: %d chars", name, len(text))
 
             except Exception as exc:
-                logger.warning("VL failed on %s: %s", img_path, exc)
+                logger.warning("VL failed on %s: %s", name, exc)
                 descriptions.append("")
 
         return descriptions

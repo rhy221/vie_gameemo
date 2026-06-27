@@ -182,21 +182,36 @@ def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> np.ndarray:
     """
     try:
         import mediapipe as mp
-        detector = mp.solutions.face_detection.FaceDetection(
-            min_detection_confidence=0.5, model_selection=0
-        )
         rgb = cv2.cvtColor(region, cv2.COLOR_BGR2RGB)
-        results = detector.process(rgb)
-        if results.detections:
-            det = results.detections[0]
-            bb = det.location_data.relative_bounding_box
-            h, w = region.shape[:2]
-            x1 = max(0, int(bb.xmin * w))
-            y1 = max(0, int(bb.ymin * h))
-            x2 = min(w, int((bb.xmin + bb.width) * w))
-            y2 = min(h, int((bb.ymin + bb.height) * h))
-            if x2 > x1 and y2 > y1:
-                return region[y1:y2, x1:x2]
+        h, w = region.shape[:2]
+
+        if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_detection"):
+            detector = mp.solutions.face_detection.FaceDetection(
+                min_detection_confidence=0.5, model_selection=0
+            )
+            results = detector.process(rgb)
+            if results.detections:
+                bb = results.detections[0].location_data.relative_bounding_box
+                x1 = max(0, int(bb.xmin * w))
+                y1 = max(0, int(bb.ymin * h))
+                x2 = min(w, int((bb.xmin + bb.width) * w))
+                y2 = min(h, int((bb.ymin + bb.height) * h))
+                if x2 > x1 and y2 > y1:
+                    return region[y1:y2, x1:x2]
+        else:
+            from vie_gameemo.preprocess.webcam_detector import (
+                _build_task_api_detector, _task_api_detect,
+            )
+            detector = _build_task_api_detector(0.5)
+            bboxes = _task_api_detect(detector, rgb)
+            if bboxes:
+                bx, by, bw, bh = bboxes[0]
+                x1 = max(0, int(bx * w))
+                y1 = max(0, int(by * h))
+                x2 = min(w, int((bx + bw) * w))
+                y2 = min(h, int((by + bh) * h))
+                if x2 > x1 and y2 > y1:
+                    return region[y1:y2, x1:x2]
     except Exception as exc:
         logger.debug("Tight crop failed: %s", exc)
     return fallback

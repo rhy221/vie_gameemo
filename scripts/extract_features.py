@@ -145,7 +145,7 @@ def main() -> int:
 
     if "text" in args.modalities:
         from vie_gameemo.encoders.text_xlmr import build_text_encoder
-        logger.info("Loading text encoder (type=%s)...", getattr(cfg.text_encoder, "type", "xlmr"))
+        logger.info("Loading text encoder (%s)...", getattr(cfg.text_encoder, "backend", getattr(cfg.text_encoder, "type", "xlmr")))
         enc = build_text_encoder(cfg.text_encoder)
         enc = enc.to(device)
         encoders["text"] = enc

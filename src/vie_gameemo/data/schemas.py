@@ -118,6 +118,7 @@ class Annotation(BaseModel):
     face_aus: dict[str, float]
     peak_frame_idx: int
     webcam_bbox: WebcamBBox | None = None
+    face_description: str = ""
     visual_objective_desc: str
     audio_tone_desc: str
     transcript: str
