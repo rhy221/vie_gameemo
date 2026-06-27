@@ -73,9 +73,10 @@ class WebcamDetector:
         try:
             import mediapipe as mp
             if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_detection"):
+                # model_selection=1 → full-range model (better for small/distant faces)
                 self._detector = mp.solutions.face_detection.FaceDetection(
                     min_detection_confidence=self.min_detection_confidence,
-                    model_selection=0,
+                    model_selection=1,
                 )
                 self._use_task_api = False
             else:
@@ -231,7 +232,10 @@ class WebcamDetector:
     def _detect_faces_in_frames(
         self, frames: list[np.ndarray]
     ) -> list[tuple[float, float, float, float]]:
-        """Run MediaPipe on each frame; return list of (xmin, ymin, w, h) in [0,1].
+        """Run MediaPipe on each frame with corner-crop fallback for small webcams.
+
+        First tries full-frame detection. If no faces found, crops and upscales
+        each corner quadrant (where webcams typically sit) and retries.
 
         Args:
             frames: List of BGR frames.
@@ -243,8 +247,51 @@ class WebcamDetector:
         for frame in frames:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             bboxes = self._detect_single_frame(rgb)
-            detections.extend(bboxes)
+            if bboxes:
+                detections.extend(bboxes)
+            else:
+                corner_bboxes = self._detect_in_corners(rgb)
+                detections.extend(corner_bboxes)
         return detections
+
+    def _detect_in_corners(
+        self, rgb: np.ndarray,
+    ) -> list[tuple[float, float, float, float]]:
+        """Crop each corner quadrant, upscale, and run detection.
+
+        Webcam overlays are small (10-15% of frame) and sit in corners.
+        Cropping + upscaling makes the face large enough for detection.
+        """
+        h, w = rgb.shape[:2]
+        # 4 corners, each covering 30% of width and height
+        crop_ratio = 0.35
+        ch, cw = int(h * crop_ratio), int(w * crop_ratio)
+        corners = [
+            (0, 0, "top-left"),
+            (0, w - cw, "top-right"),
+            (h - ch, 0, "bottom-left"),
+            (h - ch, w - cw, "bottom-right"),
+        ]
+
+        all_bboxes: list[tuple[float, float, float, float]] = []
+        for y0, x0, _name in corners:
+            crop = rgb[y0:y0 + ch, x0:x0 + cw]
+            # Upscale to at least 320px on short side for reliable detection
+            scale = max(1.0, 320.0 / min(crop.shape[:2]))
+            if scale > 1.0:
+                crop = cv2.resize(crop, None, fx=scale, fy=scale,
+                                  interpolation=cv2.INTER_LINEAR)
+
+            bboxes = self._detect_single_frame(crop)
+            for bx, by, bw, bh in bboxes:
+                # Map back to full-frame normalized coords
+                abs_x = (x0 + bx * cw) / w
+                abs_y = (y0 + by * ch) / h
+                abs_w = (bw * cw) / w
+                abs_h = (bh * ch) / h
+                all_bboxes.append((abs_x, abs_y, abs_w, abs_h))
+
+        return all_bboxes
 
     def _detect_single_frame(
         self, rgb: np.ndarray
@@ -271,21 +318,43 @@ class WebcamDetector:
         detections: list[tuple[float, float, float, float]],
         n_sampled: int,
     ) -> WebcamBBox | None:
-        """Cluster detection positions; return average bbox of most stable cluster.
+        """Cluster face detections → estimate webcam region.
+
+        Uses only small faces (< 25% frame area) for clustering to find
+        the stable webcam position. Large faces (zoom moments) are excluded
+        from clustering but NOT discarded — they're still used downstream
+        via detect_per_frame which matches any face near the stable position.
+
+        After finding the stable cluster, expands the face bbox to approximate
+        the full webcam overlay region.
 
         Args:
             detections: Normalized bounding boxes (xmin, ymin, w, h).
             n_sampled: Total frames sampled (for stability score).
 
         Returns:
-            WebcamBBox of winning cluster, or None if threshold not met.
+            WebcamBBox covering the estimated webcam region, or None.
         """
         from sklearn.cluster import DBSCAN
 
         if not detections:
             return None
 
-        centers = np.array([(x + w / 2, y + h / 2) for x, y, w, h in detections])
+        # Only use small faces for clustering (find the webcam corner).
+        # Large faces (zoom) are noise for position estimation but are
+        # valid for per-frame detection later.
+        max_face_area_for_clustering = 0.25
+        cluster_candidates = [
+            (x, y, w, h) for x, y, w, h in detections
+            if w * h < max_face_area_for_clustering
+        ]
+
+        # If no small faces found, the streamer may always be zoomed in.
+        # Fall back to using ALL detections for clustering.
+        if not cluster_candidates:
+            cluster_candidates = list(detections)
+
+        centers = np.array([(x + w / 2, y + h / 2) for x, y, w, h in cluster_candidates])
         labels = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit_predict(centers)
 
         best_cluster: int | None = None
@@ -312,11 +381,20 @@ class WebcamDetector:
             return None
 
         mask = labels == best_cluster
-        cluster_dets = [detections[i] for i, m in enumerate(mask) if m]
-        xmin = float(np.mean([d[0] for d in cluster_dets]))
-        ymin = float(np.mean([d[1] for d in cluster_dets]))
-        width = float(np.mean([d[2] for d in cluster_dets]))
-        height = float(np.mean([d[3] for d in cluster_dets]))
+        cluster_dets = [cluster_candidates[i] for i, m in enumerate(mask) if m]
+
+        # Use median instead of mean — more robust to zoom-frame outliers
+        face_xmin = float(np.median([d[0] for d in cluster_dets]))
+        face_ymin = float(np.median([d[1] for d in cluster_dets]))
+        face_w = float(np.median([d[2] for d in cluster_dets]))
+        face_h = float(np.median([d[3] for d in cluster_dets]))
+
+        # Expand face bbox → estimated webcam region (~2x horizontal, ~2.5x vertical)
+        expand_x, expand_y = 1.0, 1.5
+        xmin = max(0.0, face_xmin - face_w * expand_x * 0.5)
+        ymin = max(0.0, face_ymin - face_h * expand_y * 0.3)
+        width = min(1.0 - xmin, face_w * (1.0 + expand_x))
+        height = min(1.0 - ymin, face_h * (1.0 + expand_y))
 
         cx, cy = xmin + width / 2, ymin + height / 2
         edge_distance = float(min(cx, cy, 1.0 - cx, 1.0 - cy))
@@ -350,19 +428,23 @@ def _build_task_api_detector(min_confidence: float):
 
 
 def _ensure_task_model() -> Path:
-    """Download the blaze_face_short_range.tflite model if not cached."""
+    """Download the blaze_face_full_range.tflite model if not cached.
+
+    Full-range model detects smaller/more distant faces than short-range,
+    which is critical for gaming webcam overlays (~10-15% of frame).
+    """
     import urllib.request
 
     cache_dir = Path.home() / ".cache" / "mediapipe"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    model_path = cache_dir / "blaze_face_short_range.tflite"
+    model_path = cache_dir / "blaze_face_full_range.tflite"
     if not model_path.exists():
         url = (
             "https://storage.googleapis.com/mediapipe-models/"
-            "face_detector/blaze_face_short_range/float16/latest/"
-            "blaze_face_short_range.tflite"
+            "face_detector/blaze_face_full_range/float16/latest/"
+            "blaze_face_full_range.tflite"
         )
-        logger.info("Downloading MediaPipe face model → %s", model_path)
+        logger.info("Downloading MediaPipe face model (full-range) → %s", model_path)
         urllib.request.urlretrieve(url, model_path)
     return model_path
 
