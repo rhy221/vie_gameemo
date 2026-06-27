@@ -79,7 +79,7 @@ class WebcamDetector:
             raise ImportError("mediapipe not installed. Run: pip install mediapipe") from e
 
     def detect_webcam_region(self, clip_path: Path) -> WebcamBBox | None:
-        """Detect webcam region in a clip.
+        """Detect webcam region in a clip (stable cluster across sampled frames).
 
         Args:
             clip_path: Path to video file.
@@ -105,6 +105,99 @@ class WebcamDetector:
             return None
 
         return self._cluster_detections(detections, n_sampled=len(frames))
+
+    def detect_per_frame(
+        self, frames: list[np.ndarray],
+    ) -> list[WebcamBBox | None]:
+        """Detect face bbox per frame with cluster-based fallback.
+
+        For each frame, returns the best face bbox. When a frame has no
+        detection, falls back to the stable cluster bbox (if available).
+        Handles webcam zoom/resize mid-clip.
+
+        Args:
+            frames: List of BGR frames.
+
+        Returns:
+            List of WebcamBBox (one per frame), None where no face found
+            even with fallback.
+        """
+        self._init_detector()
+        if not frames:
+            return []
+
+        all_detections = self._detect_faces_in_frames(frames)
+        stable_bbox = self._cluster_detections(all_detections, n_sampled=len(frames))
+
+        per_frame: list[WebcamBBox | None] = []
+        for frame in frames:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self._detector.process(rgb)
+            if results.detections:
+                best = self._pick_best_detection(results.detections, stable_bbox)
+                per_frame.append(best)
+            elif stable_bbox is not None:
+                per_frame.append(stable_bbox)
+            else:
+                per_frame.append(None)
+
+        return per_frame
+
+    def detect_per_frame_from_clip(
+        self, clip_path: Path, n_frames: int | None = None,
+    ) -> list[WebcamBBox | None]:
+        """Convenience: sample frames from clip then detect per-frame.
+
+        Args:
+            clip_path: Path to video file.
+            n_frames: Number of frames to sample. Defaults to sample_n_frames.
+
+        Returns:
+            List of per-frame WebcamBBox.
+        """
+        if not clip_path.exists():
+            raise FileNotFoundError(f"Clip not found: {clip_path}")
+
+        old_n = self.sample_n_frames
+        if n_frames is not None:
+            self.sample_n_frames = n_frames
+        frames = self._sample_frames(clip_path)
+        self.sample_n_frames = old_n
+
+        return self.detect_per_frame(frames)
+
+    def _pick_best_detection(
+        self, detections, stable_bbox: WebcamBBox | None,
+    ) -> WebcamBBox:
+        """Pick the detection closest to the stable webcam region.
+
+        When zoom happens, the face bbox changes size but stays near
+        the same area. Picks the detection closest to the stable center,
+        or the largest face if no stable reference.
+        """
+        candidates = []
+        for det in detections:
+            bb = det.location_data.relative_bounding_box
+            x = max(0.0, bb.xmin)
+            y = max(0.0, bb.ymin)
+            w = min(1.0, bb.width)
+            h = min(1.0, bb.height)
+            cx, cy = x + w / 2, y + h / 2
+            edge_dist = float(min(cx, cy, 1.0 - cx, 1.0 - cy))
+            candidates.append((x, y, w, h, cx, cy, edge_dist, w * h))
+
+        if stable_bbox is not None:
+            ref_cx = stable_bbox.xmin + stable_bbox.width / 2
+            ref_cy = stable_bbox.ymin + stable_bbox.height / 2
+            candidates.sort(key=lambda c: (c[4] - ref_cx) ** 2 + (c[5] - ref_cy) ** 2)
+        else:
+            candidates.sort(key=lambda c: c[7], reverse=True)
+
+        best = candidates[0]
+        return WebcamBBox(
+            xmin=best[0], ymin=best[1], width=best[2], height=best[3],
+            stability_score=1.0, edge_distance=best[6],
+        )
 
     def _sample_frames(self, clip_path: Path) -> list[np.ndarray]:
         """Sample N frames evenly across the clip duration.

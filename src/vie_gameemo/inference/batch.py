@@ -199,6 +199,11 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
     extract_frames(clip_path, frames_dir, target_fps=4)
     frame_paths = sorted(frames_dir.glob("*.jpg"))
 
+    # Detect webcam region for context encoder
+    from vie_gameemo.preprocess.webcam_detector import WebcamDetector
+    detector = WebcamDetector()
+    webcam_bbox = detector.detect_webcam_region(clip_path)
+
     features: dict = {}
 
     from vie_gameemo.encoders.audio_ast import ASTAudioEncoder
@@ -208,7 +213,12 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
 
     from vie_gameemo.encoders.context_vit import ContextEncoder
     ctx_enc = ContextEncoder()
-    features["context"] = ctx_enc.encode(frame_paths)
+    if webcam_bbox is not None:
+        from vie_gameemo.preprocess.face_crop import batch_extract_webcam_regions
+        webcam_crops = batch_extract_webcam_regions(frame_paths, webcam_bbox)
+        features["context"] = ctx_enc.encode(webcam_crops)
+    else:
+        features["context"] = ctx_enc.encode(None)
     del ctx_enc
 
     from vie_gameemo.encoders.text_xlmr import XLMRTextEncoder

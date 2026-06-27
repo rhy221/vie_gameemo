@@ -68,7 +68,7 @@ def extract_streamer_face(
 
 def batch_extract_faces(
     frame_paths: list[Path],
-    webcam_bbox: WebcamBBox,
+    webcam_bbox: WebcamBBox | list[WebcamBBox | None],
     target_size: tuple[int, int] = (224, 224),
     margin: float = 0.2,
 ) -> np.ndarray:
@@ -76,23 +76,98 @@ def batch_extract_faces(
 
     Args:
         frame_paths: Paths to extracted frames (JPG).
-        webcam_bbox: Webcam region (same for whole clip).
+        webcam_bbox: Single bbox (same for all frames) or per-frame list.
         target_size: Output size (width, height).
         margin: Margin expansion.
 
     Returns:
         Stacked array of shape (N, H, W, 3) in BGR.
     """
+    per_frame = isinstance(webcam_bbox, list)
     faces = []
-    for path in frame_paths:
+    for i, path in enumerate(frame_paths):
         frame = cv2.imread(str(path))
         if frame is None:
             logger.warning("Cannot read frame %s; using zeros", path)
             faces.append(np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8))
             continue
-        face = extract_streamer_face(frame, webcam_bbox, target_size, margin)
+        bbox = webcam_bbox[i] if per_frame else webcam_bbox
+        if bbox is None:
+            faces.append(np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8))
+            continue
+        face = extract_streamer_face(frame, bbox, target_size, margin)
         faces.append(face)
     return np.stack(faces, axis=0)
+
+
+def extract_webcam_region(
+    frame: np.ndarray,
+    webcam_bbox: WebcamBBox,
+    target_size: tuple[int, int] = (224, 224),
+    margin: float = 0.1,
+) -> np.ndarray:
+    """Crop the webcam region (wider than face crop, no tight crop).
+
+    Args:
+        frame: Input frame as BGR ndarray (HxWx3).
+        webcam_bbox: Detected webcam region (normalized coords).
+        target_size: (width, height) for output.
+        margin: Small margin to avoid cutting off edges.
+
+    Returns:
+        Cropped + resized webcam region as BGR ndarray.
+    """
+    if frame is None or frame.size == 0:
+        return np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
+
+    h, w = frame.shape[:2]
+
+    x1 = int((webcam_bbox.xmin - margin * webcam_bbox.width) * w)
+    y1 = int((webcam_bbox.ymin - margin * webcam_bbox.height) * h)
+    x2 = int((webcam_bbox.xmin + webcam_bbox.width * (1 + margin)) * w)
+    y2 = int((webcam_bbox.ymin + webcam_bbox.height * (1 + margin)) * h)
+
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+
+    if x2 <= x1 or y2 <= y1:
+        return np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
+
+    cropped = frame[y1:y2, x1:x2]
+    return cv2.resize(cropped, target_size, interpolation=cv2.INTER_LINEAR)
+
+
+def batch_extract_webcam_regions(
+    frame_paths: list[Path],
+    webcam_bbox: WebcamBBox | list[WebcamBBox | None],
+    target_size: tuple[int, int] = (224, 224),
+    margin: float = 0.1,
+) -> list[np.ndarray]:
+    """Batch webcam region extraction for context encoder.
+
+    Args:
+        frame_paths: Paths to extracted frames (JPG).
+        webcam_bbox: Single bbox (same for all frames) or per-frame list.
+        target_size: Output size (width, height).
+        margin: Margin expansion.
+
+    Returns:
+        List of BGR ndarrays, one per frame.
+    """
+    per_frame = isinstance(webcam_bbox, list)
+    crops = []
+    for i, path in enumerate(frame_paths):
+        frame = cv2.imread(str(path))
+        if frame is None:
+            logger.warning("Cannot read frame %s; using zeros", path)
+            crops.append(np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8))
+            continue
+        bbox = webcam_bbox[i] if per_frame else webcam_bbox
+        if bbox is None:
+            crops.append(np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8))
+            continue
+        crops.append(extract_webcam_region(frame, bbox, target_size, margin))
+    return crops
 
 
 def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> np.ndarray:

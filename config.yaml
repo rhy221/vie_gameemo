@@ -290,7 +290,7 @@ visual_encoder:
         spatial_pool: [2, 2]     # 2x2 → 64 tokens/frame
         pool_method: "attention" # "mean" | "max" | "attention" | "video_native"
 
-  # Path 2: context encoder (gameplay context)
+  # Path 2: context encoder (webcam region — body language, posture, background)
   context_encoder:
     model_name: "google/vit-base-patch16-224"   # ImageNet pretrain
     n_frames: 16
