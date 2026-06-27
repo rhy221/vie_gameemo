@@ -227,11 +227,16 @@ def main() -> int:
                 feat, _ = encoders["face"].encode(crops if crops else None)
                 features["face"] = feat.squeeze(0)
             else:
-                # No webcam → full-frame fallback (ViT-FER tự xử lý)
-                logger.info("No webcam for %s — face encoder uses full frames", clip_id)
-                full_crops = [cv2.imread(str(fp)) for fp in frame_paths]
-                full_crops = [c for c in full_crops if c is not None]
-                feat, _ = encoders["face"].encode(full_crops if full_crops else None)
+                # No webcam bbox → detect face in full-frame via MediaPipe, crop nếu tìm thấy
+                from vie_gameemo.preprocess.face_crop import _tight_face_crop
+                logger.info("No webcam for %s — detecting face in full frames", clip_id)
+                crops = []
+                for fp in frame_paths:
+                    frame = cv2.imread(str(fp))
+                    if frame is not None:
+                        cropped = _tight_face_crop(frame, fallback=frame)
+                        crops.append(cropped)
+                feat, _ = encoders["face"].encode(crops if crops else None)
                 features["face"] = feat.squeeze(0)
 
         if "context" in encoders:
