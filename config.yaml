@@ -125,16 +125,19 @@ annotation:
     method: "max_au_intensity"   # alternatives: middle, attention_pool
     target_aus: [1, 2, 4, 6, 12, 25]  # emotion-relevant AUs
 
-  # Agent: Visual objective (Cvod) — Qwen2.5-VL
+  # Agent: Visual description — Qwen2.5-VL (webcam region)
   qwen_vl:
     model_name: "Qwen/Qwen2.5-VL-7B-Instruct"   # 32B/72B if A100 available
     quantization: "4bit"        # "4bit" | "8bit" | "none"
     max_new_tokens: 200
     temperature: 0.3
     prompt: |
-      Mô tả ngắn gọn (3-4 câu) cảnh trong frame này bằng tiếng Việt.
-      Tập trung vào: tư thế, hành động, môi trường streamer.
-      Không suy luận cảm xúc.
+      Đây là ảnh webcam của streamer trong lúc livestream game.
+      Mô tả ngắn gọn (3-4 câu) bằng tiếng Việt:
+      - Biểu cảm khuôn mặt (cười, nhăn mặt, mở miệng, nhắm mắt, ...)
+      - Cử chỉ, hành động (giơ tay, đập bàn, che mặt, gật đầu, nhảy, ...)
+      - Tư thế, hướng nhìn (cúi xuống, ngửa ra sau, nhìn camera, ...)
+      Không suy luận cảm xúc, chỉ mô tả khách quan những gì nhìn thấy.
 
   # Agent: Audio prosody (Catd) — Qwen2-Audio
   qwen_audio:

@@ -64,6 +64,7 @@ class WebcamDetector:
         self.stability_threshold = stability_threshold
         self.edge_bias = edge_bias
         self._detector = None
+        self._use_task_api = False
 
     def _init_detector(self) -> None:
         """Lazy-initialize the MediaPipe face detection model."""
@@ -71,10 +72,15 @@ class WebcamDetector:
             return
         try:
             import mediapipe as mp
-            self._detector = mp.solutions.face_detection.FaceDetection(
-                min_detection_confidence=self.min_detection_confidence,
-                model_selection=0,
-            )
+            if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_detection"):
+                self._detector = mp.solutions.face_detection.FaceDetection(
+                    min_detection_confidence=self.min_detection_confidence,
+                    model_selection=0,
+                )
+                self._use_task_api = False
+            else:
+                self._detector = _build_task_api_detector(self.min_detection_confidence)
+                self._use_task_api = True
         except ImportError as e:
             raise ImportError("mediapipe not installed. Run: pip install mediapipe") from e
 
@@ -132,9 +138,9 @@ class WebcamDetector:
         per_frame: list[WebcamBBox | None] = []
         for frame in frames:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self._detector.process(rgb)
-            if results.detections:
-                best = self._pick_best_detection(results.detections, stable_bbox)
+            bboxes = self._detect_single_frame(rgb)
+            if bboxes:
+                best = self._pick_best_bbox(bboxes, stable_bbox)
                 per_frame.append(best)
             elif stable_bbox is not None:
                 per_frame.append(stable_bbox)
@@ -166,22 +172,19 @@ class WebcamDetector:
 
         return self.detect_per_frame(frames)
 
-    def _pick_best_detection(
-        self, detections, stable_bbox: WebcamBBox | None,
+    def _pick_best_bbox(
+        self,
+        bboxes: list[tuple[float, float, float, float]],
+        stable_bbox: WebcamBBox | None,
     ) -> WebcamBBox:
-        """Pick the detection closest to the stable webcam region.
+        """Pick the bbox closest to the stable webcam region.
 
         When zoom happens, the face bbox changes size but stays near
-        the same area. Picks the detection closest to the stable center,
+        the same area. Picks the bbox closest to the stable center,
         or the largest face if no stable reference.
         """
         candidates = []
-        for det in detections:
-            bb = det.location_data.relative_bounding_box
-            x = max(0.0, bb.xmin)
-            y = max(0.0, bb.ymin)
-            w = min(1.0, bb.width)
-            h = min(1.0, bb.height)
+        for x, y, w, h in bboxes:
             cx, cy = x + w / 2, y + h / 2
             edge_dist = float(min(cx, cy, 1.0 - cx, 1.0 - cy))
             candidates.append((x, y, w, h, cx, cy, edge_dist, w * h))
@@ -239,17 +242,29 @@ class WebcamDetector:
         detections: list[tuple[float, float, float, float]] = []
         for frame in frames:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self._detector.process(rgb)
-            if results.detections:
-                for det in results.detections:
-                    bb = det.location_data.relative_bounding_box
-                    detections.append((
-                        max(0.0, bb.xmin),
-                        max(0.0, bb.ymin),
-                        min(1.0, bb.width),
-                        min(1.0, bb.height),
-                    ))
+            bboxes = self._detect_single_frame(rgb)
+            detections.extend(bboxes)
         return detections
+
+    def _detect_single_frame(
+        self, rgb: np.ndarray
+    ) -> list[tuple[float, float, float, float]]:
+        """Detect faces in a single RGB frame, compatible with both APIs."""
+        if self._use_task_api:
+            return _task_api_detect(self._detector, rgb)
+        results = self._detector.process(rgb)
+        if not results.detections:
+            return []
+        bboxes = []
+        for det in results.detections:
+            bb = det.location_data.relative_bounding_box
+            bboxes.append((
+                max(0.0, bb.xmin),
+                max(0.0, bb.ymin),
+                min(1.0, bb.width),
+                min(1.0, bb.height),
+            ))
+        return bboxes
 
     def _cluster_detections(
         self,
@@ -315,3 +330,59 @@ class WebcamDetector:
             stability_score=stability_score,
             edge_distance=edge_distance,
         )
+
+
+# ---------------------------------------------------------------------------
+# MediaPipe Task API helpers (mediapipe >= 0.10.18)
+# ---------------------------------------------------------------------------
+
+def _build_task_api_detector(min_confidence: float):
+    """Build a face detector using the new MediaPipe Task API."""
+    import mediapipe as mp
+    from mediapipe.tasks.python import vision
+
+    model_path = _ensure_task_model()
+    options = vision.FaceDetectorOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=str(model_path)),
+        min_detection_confidence=min_confidence,
+    )
+    return vision.FaceDetector.create_from_options(options)
+
+
+def _ensure_task_model() -> Path:
+    """Download the blaze_face_short_range.tflite model if not cached."""
+    import urllib.request
+
+    cache_dir = Path.home() / ".cache" / "mediapipe"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    model_path = cache_dir / "blaze_face_short_range.tflite"
+    if not model_path.exists():
+        url = (
+            "https://storage.googleapis.com/mediapipe-models/"
+            "face_detector/blaze_face_short_range/float16/latest/"
+            "blaze_face_short_range.tflite"
+        )
+        logger.info("Downloading MediaPipe face model → %s", model_path)
+        urllib.request.urlretrieve(url, model_path)
+    return model_path
+
+
+def _task_api_detect(
+    detector, rgb: np.ndarray
+) -> list[tuple[float, float, float, float]]:
+    """Run the Task API detector on an RGB frame."""
+    import mediapipe as mp
+
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    result = detector.detect(mp_image)
+    bboxes = []
+    h, w = rgb.shape[:2]
+    for det in result.detections:
+        bb = det.bounding_box
+        bboxes.append((
+            max(0.0, bb.origin_x / w),
+            max(0.0, bb.origin_y / h),
+            min(1.0, bb.width / w),
+            min(1.0, bb.height / h),
+        ))
+    return bboxes
