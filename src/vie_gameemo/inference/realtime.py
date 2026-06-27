@@ -233,11 +233,24 @@ class RealtimeInferenceRunner:
             return torch.zeros(1, 1, d), False
 
     def _encode_context(self, frames: list) -> torch.Tensor:
-        """Encode full frames → (1, T, 768) context tensor."""
+        """Encode webcam region crops → (1, T, 768) context tensor."""
         try:
             from vie_gameemo.encoders.context_vit import ContextEncoder
             enc = ContextEncoder()
-            tensor = enc.encode(frames)
+            if self.cached_webcam_bbox is not None:
+                import cv2
+                import numpy as np
+                from vie_gameemo.preprocess.face_crop import extract_webcam_region
+                crops = []
+                for f in frames:
+                    if hasattr(f, "shape"):  # BGR ndarray
+                        crops.append(extract_webcam_region(f, self.cached_webcam_bbox))
+                    else:  # PIL Image
+                        arr = cv2.cvtColor(np.array(f), cv2.COLOR_RGB2BGR)
+                        crops.append(extract_webcam_region(arr, self.cached_webcam_bbox))
+                tensor = enc.encode(crops)
+            else:
+                tensor = enc.encode(None)
             del enc
             return tensor
         except Exception as exc:

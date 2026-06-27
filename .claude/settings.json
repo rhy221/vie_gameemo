@@ -4,7 +4,11 @@
       "Bash(python -m pytest tests/ -v --tb=short)",
       "Bash(pip install *)",
       "PowerShell(python -m pytest tests/ -v --tb=short 2>&1)",
-      "Bash(pdftotext \"c:\\\\Projects\\\\vie-gameemo-skeleton\\\\2601.16449v2.pdf\" -)"
+      "Bash(pdftotext \"c:\\\\Projects\\\\vie-gameemo-skeleton\\\\2601.16449v2.pdf\" -)",
+      "Read(//c/Projects/music_app_backend/services/recommend-service/**)"
+    ],
+    "additionalDirectories": [
+      "C:\\Projects\\music_app_backend\\services\\recommend-service"
     ]
   }
 }

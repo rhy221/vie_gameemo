@@ -1,18 +1,18 @@
-"""Context encoder using ViT-ImageNet (Path 2 of dual-path visual).
+"""Webcam context encoder using ViT-ImageNet (Path 2 of dual-path visual).
 
-Encodes gameplay context (full frames, NOT cropped to face) using a generic
-ViT pretrained on ImageNet. This captures:
-    - Game scene state (UI, HUD, kill feed, score)
-    - In-game cutscene visuals
-    - Overall environmental context
+Encodes the streamer's webcam region (NOT tight face crop) using a generic
+ViT pretrained on ImageNet. This captures broader cues than the face encoder:
+    - Body language / posture
+    - Webcam background / lighting changes
+    - Upper-body gestures
 
-Together with Path 1 (face encoder), this gives the model both streamer's
-emotional expression AND the situation triggering it.
+Together with Path 1 (face encoder, tight crop), this gives the model both
+fine-grained facial expression AND wider streamer context.
 """
 
 import logging
-from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class ContextEncoder(nn.Module):
-    """Gameplay context encoder using generic ViT (Path 2 of dual-path)."""
+    """Webcam context encoder using generic ViT (Path 2 of dual-path)."""
 
     def __init__(
         self,
@@ -33,15 +33,6 @@ class ContextEncoder(nn.Module):
         temporal_pool: str = "mean",
         device: str | torch.device = "cuda",
     ) -> None:
-        """Initialize context encoder.
-
-        Args:
-            model_name: HF model ID (ImageNet-pretrained ViT).
-            n_frames: Frames sampled per clip for temporal coverage.
-            target_size: Frame resize target.
-            temporal_pool: 'mean' → single (1,768); 'none' → (n_frames,768).
-            device: Torch device.
-        """
         super().__init__()
         self.model_name = model_name
         self.n_frames = n_frames
@@ -59,29 +50,26 @@ class ContextEncoder(nn.Module):
         logger.info("Context encoder loaded and frozen")
 
     @torch.no_grad()
-    def encode(self, frame_paths: list[Path]) -> Tensor:
-        """Encode a clip's frames as context.
+    def encode(self, webcam_crops: list[np.ndarray] | None) -> Tensor:
+        """Encode webcam region crops (wider than face crops).
 
         Args:
-            frame_paths: All extracted frame paths (sorted by time).
-                Uniformly subsampled to n_frames.
+            webcam_crops: List of BGR ndarrays cropped to the webcam region.
+                If None or empty, returns zeros (no-webcam mode).
 
         Returns:
             Tensor of shape (1, T, 768):
                 - T=1 if temporal_pool='mean'
                 - T=n_frames if temporal_pool='none'
-
-        Raises:
-            ValueError: If frame_paths is empty.
         """
-        if not frame_paths:
+        if not webcam_crops:
             T = 1 if self.temporal_pool == "mean" else self.n_frames
             return torch.zeros(1, T, 768, device=self.device)
 
-        sampled = self._sample_frames_uniform(frame_paths, self.n_frames)
+        sampled = _uniform_sample(webcam_crops, self.n_frames)
         cls_tokens = []
-        for fp in sampled:
-            image = Image.open(fp).convert("RGB")
+        for crop in sampled:
+            image = _bgr_to_pil(crop)
             inputs = self.processor(images=image, return_tensors="pt")
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             outputs = self.model(**inputs)
@@ -96,33 +84,33 @@ class ContextEncoder(nn.Module):
             return stacked.unsqueeze(0)  # (1, n_frames, 768)
 
     @torch.no_grad()
-    def encode_batch(self, batch_frame_paths: list[list[Path]]) -> Tensor:
-        """Batch encode multiple clips' contexts.
+    def encode_batch(
+        self, batch_webcam_crops: list[list[np.ndarray] | None]
+    ) -> Tensor:
+        """Batch encode multiple clips' webcam regions.
 
         Args:
-            batch_frame_paths: List of per-clip frame path lists.
+            batch_webcam_crops: List of per-clip webcam crop lists (some may be None).
 
         Returns:
             Tensor of shape (B, T, 768).
         """
-        tensors = [self.encode(fps) for fps in batch_frame_paths]
+        tensors = [self.encode(crops) for crops in batch_webcam_crops]
         return torch.cat(tensors, dim=0)
 
-    @staticmethod
-    def _sample_frames_uniform(frame_paths: list[Path], n: int) -> list[Path]:
-        """Uniformly subsample exactly n frames from a list, preserving order.
 
-        Args:
-            frame_paths: Sorted list of frame paths.
-            n: Target count.
+def _bgr_to_pil(bgr: np.ndarray) -> Image.Image:
+    """Convert BGR ndarray to RGB PIL Image."""
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(rgb)
 
-        Returns:
-            List of exactly n paths. If len < n, last frame is repeated.
-        """
-        if not frame_paths:
-            return frame_paths
-        if len(frame_paths) >= n:
-            indices = np.linspace(0, len(frame_paths) - 1, n, dtype=int)
-            return [frame_paths[i] for i in indices]
-        pad_n = n - len(frame_paths)
-        return list(frame_paths) + [frame_paths[-1]] * pad_n
+
+def _uniform_sample(items: list, n: int) -> list:
+    """Uniformly sample exactly n items, padding with last if needed."""
+    if not items:
+        return items
+    if len(items) >= n:
+        indices = np.linspace(0, len(items) - 1, n, dtype=int)
+        return [items[i] for i in indices]
+    pad_n = n - len(items)
+    return list(items) + [items[-1]] * pad_n
