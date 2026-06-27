@@ -140,29 +140,31 @@ def _load_llm(cfg: SimpleNamespace):
     llm_cfg = cfg.llm
     active = getattr(llm_cfg, "active_setup", "llm1")
 
+    cognition_ckpt = getattr(llm_cfg, "cognition_checkpoint", None)
+
     if active == "llm1":
         from vie_gameemo.llm.llm1_explainer import LLM1Explainer
         return LLM1Explainer(
             model_name=llm_cfg.base_model.name,
             quantization=llm_cfg.base_model.quantization,
+            modal_adapter_ckpt=cognition_ckpt,
         )
     elif active == "llm2":
         from vie_gameemo.llm.llm2_coreasoner import LLM2CoReasoner
-        cognition_ckpt = getattr(llm_cfg, "cognition_checkpoint", None)
         return LLM2CoReasoner(
             model_name=llm_cfg.base_model.name,
             quantization=llm_cfg.base_model.quantization,
             modal_adapter_ckpt=Path(cognition_ckpt) if cognition_ckpt else None,
         )
     elif active == "llm3":
-        from vie_gameemo.llm.llm3_vlm import LLM3VLMEndToEnd
-        return LLM3VLMEndToEnd(
-            vlm_model=getattr(llm_cfg, "vlm_model", "Qwen/Qwen2.5-VL-7B-Instruct"),
+        from vie_gameemo.llm.llm3_vlm import LLM3PureReasoner
+        return LLM3PureReasoner(
+            model_name=llm_cfg.base_model.name,
             quantization=llm_cfg.base_model.quantization,
+            modal_adapter_ckpt=Path(cognition_ckpt) if cognition_ckpt else None,
         )
     elif active == "llm4":
         from vie_gameemo.llm.llm4_rlvr import LLM4RLVR
-        cognition_ckpt = getattr(llm_cfg, "cognition_checkpoint", None)
         return LLM4RLVR(
             base_model=llm_cfg.base_model.name,
             quantization=llm_cfg.base_model.quantization,

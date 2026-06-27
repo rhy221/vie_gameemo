@@ -1,87 +1,66 @@
-"""LLM-3: VLM End-to-End with LoRA fine-tune.
+"""LLM-3: Pure Reasoner (soft token only → prediction + reasoning).
 
-Uses Qwen2.5-VL as the backbone. Receives raw video frames + optional
-spectrogram image (audio-as-image trick), predicts emotion + reasoning
-in one forward pass. Fine-tuned via LoRA on Vie-GameEmo annotated data.
+Receives ONLY the fusion embedding (via ModalAdapter → soft token).
+No MLP label, no text descriptions. The LLM must predict the emotion
+and generate reasoning purely from the multimodal soft token.
+
+Requires cognition training to learn the ModalAdapter projection.
 """
 
 import logging
 from pathlib import Path
+
+import torch
 
 from vie_gameemo.llm.base import BaseLLMReasoner, LLMOutput
 from vie_gameemo.llm.llm1_explainer import LLM1Explainer, _make_bnb_config
 
 logger = logging.getLogger(__name__)
 
-_VLM_SYSTEM_PROMPT = """\
-Bạn là chuyên gia phân tích cảm xúc game streaming. Nhìn vào các hình ảnh từ clip sau và cho biết cảm xúc của streamer.
+_VALID_LABELS = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
-Transcript có thể bằng tiếng Việt hoặc tiếng Anh — hiểu trực tiếp, KHÔNG dịch.
-Trả lời hoàn toàn bằng tiếng Việt.
+_PURE_REASON_PROMPT = """\
+Dựa trên đặc trưng đa phương thức của clip game livestream, hãy phân tích
+và xác định cảm xúc của streamer.
 
-Trả lời theo format CHÍNH XÁC:
-<think>
-[Phân tích 3-5 câu về biểu cảm, âm thanh, và bối cảnh game]
-</think>
-<answer>[neutral/hype/amused/tilted/sad/shocked/fear/disgusted]</answer>
+Các nhãn có thể: {emotion_categories}
+
+Trả lời hoàn toàn bằng tiếng Việt theo format:
+<think>[phân tích 3-5 câu]</think>
+<answer>[một nhãn từ danh sách trên]</answer>
 """
 
 
-class LLM3VLMEndToEnd(BaseLLMReasoner):
-    """VLM end-to-end reasoner with LoRA fine-tune."""
+class LLM3PureReasoner(BaseLLMReasoner):
+    """Pure reasoner: soft token only → emotion prediction + reasoning."""
 
     def __init__(
         self,
-        vlm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct",
-        n_input_frames: int = 8,
-        include_spectrogram_image: bool = True,
+        model_name: str = "Qwen/Qwen2.5-7B-Instruct",
         quantization: str = "4bit",
         max_new_tokens: int = 400,
-        lora_rank: int = 16,
-        lora_alpha: int = 32,
-        lora_dropout: float = 0.05,
-        lora_target_modules: list[str] | None = None,
-        adapter_path: Path | None = None,
+        temperature: float = 0.5,
+        finetuned_checkpoint: str | None = None,
+        modal_adapter_ckpt: Path | None = None,
+        d_fusion: int = 768,
     ) -> None:
-        """Initialize.
-
-        Args:
-            vlm_model: HF VLM model ID.
-            n_input_frames: Frames sampled from clip as VLM input.
-            include_spectrogram_image: Include spectrogram as additional image.
-            quantization: '4bit' | '8bit' | 'none'.
-            max_new_tokens: Max gen length.
-            lora_rank: LoRA rank.
-            lora_alpha: LoRA alpha.
-            lora_dropout: LoRA dropout.
-            lora_target_modules: Modules to apply LoRA to.
-            adapter_path: Path to pretrained LoRA adapter.
-        """
-        self.vlm_model = vlm_model
-        self.n_input_frames = n_input_frames
-        self.include_spectrogram_image = include_spectrogram_image
+        self.model_name = model_name
         self.quantization = quantization
         self.max_new_tokens = max_new_tokens
-        self.lora_rank = lora_rank
-        self.lora_alpha = lora_alpha
-        self.lora_dropout = lora_dropout
-        self.lora_target_modules = lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
-        self.adapter_path = adapter_path
+        self.temperature = temperature
+        self.finetuned_checkpoint = finetuned_checkpoint
+        self.modal_adapter_ckpt = Path(modal_adapter_ckpt) if modal_adapter_ckpt else None
+        self.d_fusion = d_fusion
         self.model = None
-        self.processor = None
+        self.tokenizer = None
+        self.modal_adapter = None
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def load(self) -> None:
-        """Load VLM + apply LoRA adapter if available."""
-        import torch
-        from peft import LoraConfig, PeftModel, get_peft_model
-        from transformers import AutoProcessor
+        """Load model + tokenizer + ModalAdapter + optional LoRA."""
+        from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        try:
-            from transformers import Qwen2_5_VLForConditionalGeneration as QVLM
-        except ImportError:
-            from transformers import AutoModelForVision2Seq as QVLM
-
-        logger.info("Loading LLM-3 VLM: %s (quant=%s)", self.vlm_model, self.quantization)
+        logger.info("Loading LLM-3: %s (quant=%s)", self.model_name, self.quantization)
         bnb_cfg = _make_bnb_config(self.quantization)
         kwargs: dict = {"device_map": "auto"}
         if bnb_cfg is not None:
@@ -89,142 +68,87 @@ class LLM3VLMEndToEnd(BaseLLMReasoner):
         else:
             kwargs["torch_dtype"] = torch.float16
 
-        self.model = QVLM.from_pretrained(self.vlm_model, **kwargs)
-        self.processor = AutoProcessor.from_pretrained(self.vlm_model)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **kwargs)
 
-        if self.adapter_path is not None and Path(self.adapter_path).exists():
-            self.model = PeftModel.from_pretrained(self.model, str(self.adapter_path))
-            logger.info("Loaded LoRA adapter from %s", self.adapter_path)
+        if self.finetuned_checkpoint:
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(self.model, self.finetuned_checkpoint)
+            logger.info("Loaded LoRA adapter from %s", self.finetuned_checkpoint)
 
         self.model.eval()
-        logger.info("LLM-3 VLM loaded")
+
+        if self.modal_adapter_ckpt is not None and self.modal_adapter_ckpt.exists():
+            from vie_gameemo.llm.modal_adapter import ModalAdapter
+            llm_hidden = self.model.config.hidden_size
+            self.modal_adapter = ModalAdapter.from_checkpoint(
+                self.modal_adapter_ckpt, d_fusion=self.d_fusion, d_llm=llm_hidden
+            ).to(self.device)
+            self.modal_adapter.eval()
+            logger.info("Loaded ModalAdapter from %s", self.modal_adapter_ckpt)
+        else:
+            logger.warning("No ModalAdapter checkpoint — LLM-3 requires cognition training first")
+
+        logger.info("LLM-3 loaded")
 
     def unload(self) -> None:
         """Free VRAM."""
         import gc
-        import torch
         self.model = None
-        self.processor = None
+        self.tokenizer = None
+        self.modal_adapter = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def reason(self, evidence: dict) -> LLMOutput:
-        """Reason on a single clip using raw images.
+        """Predict emotion purely from fusion embedding.
 
         Args:
-            evidence: Dict with keys:
-                'frame_paths': list of frame Path objects,
-                'audio_path': Path to wav (for spectrogram),
-                'transcript': str.
+            evidence: Dict with:
+                - 'fusion_emb': (1, T, 768) tensor (required)
 
         Returns:
-            LLMOutput.
+            LLMOutput with LLM's own label and reasoning.
         """
         if self.model is None:
             self.load()
 
-        import numpy as np
-        import torch
-        from PIL import Image
-
-        frame_paths: list[Path] = evidence.get("frame_paths", [])
-        audio_path: Path | None = evidence.get("audio_path")
-        transcript: str = evidence.get("transcript", "")
-
-        # Sample frames
-        if frame_paths:
-            indices = np.linspace(0, len(frame_paths) - 1, self.n_input_frames, dtype=int)
-            frames = [Image.open(frame_paths[i]).convert("RGB") for i in indices]
-        else:
-            frames = []
-
-        # Optional spectrogram
-        if self.include_spectrogram_image and audio_path and Path(audio_path).exists():
-            try:
-                spec_img = self.render_spectrogram_image(Path(audio_path))
-                frames.append(spec_img)
-            except Exception as exc:
-                logger.debug("Spectrogram render failed: %s", exc)
-
-        images = frames if frames else None
-        source_language = evidence.get("source_language", "vi")
-        text_prompt = _VLM_SYSTEM_PROMPT
-        text_prompt += f"\nNgôn ngữ gốc của clip: {source_language}"
-        if transcript:
-            text_prompt += f'\nTranscript: "{transcript}"'
-
-        content = []
-        if images:
-            for img in images:
-                content.append({"type": "image", "image": img})
-        content.append({"type": "text", "text": text_prompt})
-
-        messages = [{"role": "user", "content": content}]
-        text_input = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
-            enable_thinking=False,
-        )
-
-        inputs = self.processor(
-            text=[text_input],
-            images=images if images else None,
-            return_tensors="pt",
-        ).to(self.model.device)
-
-        with torch.no_grad():
-            out_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                temperature=0.7,
-                do_sample=True,
+        if self.modal_adapter is None:
+            raise RuntimeError(
+                "LLM-3 requires a trained ModalAdapter. "
+                "Run cognition training first (--stage cognition)."
             )
 
-        out = out_ids[:, inputs["input_ids"].shape[1]:]
-        raw = self.processor.batch_decode(out, skip_special_tokens=True)[0].strip()
+        fusion_emb = evidence["fusion_emb"].to(self.device)
+
+        with torch.no_grad():
+            soft_token = self.modal_adapter(fusion_emb).mean(dim=1, keepdim=True)
+
+            prompt = _PURE_REASON_PROMPT.format(
+                emotion_categories=", ".join(_VALID_LABELS),
+            )
+            text_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+            text_embeds = self.model.get_input_embeddings()(text_ids)
+
+            # [soft_token | prompt_tokens]
+            inputs_embeds = torch.cat([soft_token, text_embeds], dim=1)
+
+            out_ids = self.model.generate(
+                inputs_embeds=inputs_embeds,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=self.temperature > 0,
+                temperature=self.temperature,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+            raw = self.tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
+
         reasoning, answer, fmt_valid = LLM1Explainer.parse_output(raw)
+
+        if answer not in _VALID_LABELS:
+            answer = "neutral"
+
         return LLMOutput(reasoning=reasoning, answer=answer, raw=raw, format_valid=fmt_valid)
 
     def reason_batch(self, evidences: list[dict]) -> list[LLMOutput]:
-        """Batch reason (sequential).
-
-        Args:
-            evidences: List of evidence dicts.
-
-        Returns:
-            List of LLMOutput.
-        """
         return [self.reason(e) for e in evidences]
-
-    @staticmethod
-    def render_spectrogram_image(audio_path: Path) -> "Image.Image":
-        """Render audio spectrogram as RGB image for VLM input.
-
-        Args:
-            audio_path: Path to wav file.
-
-        Returns:
-            PIL RGB Image of the spectrogram.
-        """
-        import io
-
-        import librosa
-        import librosa.display
-        import matplotlib.pyplot as plt
-        import numpy as np
-        from PIL import Image
-
-        y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
-        mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
-        mel_db = librosa.power_to_db(mel, ref=np.max)
-
-        fig, ax = plt.subplots(figsize=(4, 4), dpi=56)  # 224x224 pixels
-        librosa.display.specshow(mel_db, sr=sr, x_axis="time", y_axis="mel", ax=ax)
-        ax.set_axis_off()
-        fig.tight_layout(pad=0)
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
-        plt.close(fig)
-        buf.seek(0)
-        return Image.open(buf).convert("RGB")

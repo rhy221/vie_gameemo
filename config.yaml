@@ -380,11 +380,12 @@ llm:
   # Active setup for current run
   active_setup: "llm1"   # "llm1" | "llm2" | "llm3" | "llm4"
 
-  # Path to cognition checkpoint (for ModalAdapter in LLM-2/4).
+  # Path to cognition checkpoint (for ModalAdapter in LLM-1/2/3).
   # Set after running: python scripts/train.py --stage cognition
+  # LLM-1 uses it optionally (soft token), LLM-2/3 require it.
   cognition_checkpoint: null   # e.g. "outputs/checkpoints/cognition_best.pt"
 
-  # Shared base model (for setups that need one)
+  # Shared base model
   base_model:
     name: "Qwen/Qwen2.5-7B-Instruct"
     fallback: "Qwen/Qwen2.5-1.5B-Instruct"   # if no A100
@@ -393,37 +394,18 @@ llm:
     max_new_tokens: 300
     temperature: 0.7
 
-  # Setup 1: Post-hoc Explainer (no training)
-  llm1:
-    prompt_template: |
-      Streamer được dự đoán đang ở trạng thái: {label}.
-      Ngôn ngữ gốc của clip: {source_language}
+  # Setup 1: Explainer (no training)
+  # Input: soft token + MLP label → explains WHY (never overrides label)
+  # If no cognition checkpoint: falls back to text-only prompt
+  llm1: {}
 
-      Bằng chứng đa phương thức:
-      - Khuôn mặt (Action Units): {face_aus}
-      - Bối cảnh game: {game_context}
-      - Giọng nói: pitch_avg={pitch_hz}Hz, energy={rms_db}dB, shout={shout}
-      - Lời nói: "{transcript}"
+  # Setup 2: Co-Reasoner (requires cognition training)
+  # Input: soft token + MLP label (hint) → own prediction (may override)
+  llm2: {}
 
-      Transcript có thể bằng tiếng Việt hoặc tiếng Anh — hiểu trực tiếp, KHÔNG dịch.
-      Trả lời hoàn toàn bằng tiếng Việt.
-      Hãy giải thích ngắn gọn (dưới 100 từ) vì sao streamer đang ở trạng thái này.
-      Nếu có slang gaming tiếng Anh, hãy giải thích nghĩa.
-
-  # Setup 2: Co-Reasoner (modality-to-text + LLM)
-  llm2:
-    use_modality_descriptions: true   # convert each modality to text first
-
-  # Setup 3: VLM End-to-End with LoRA
-  llm3:
-    vlm_model: "Qwen/Qwen2.5-VL-7B-Instruct"
-    n_input_frames: 8
-    include_spectrogram_image: true
-    lora:
-      rank: 16
-      alpha: 32
-      dropout: 0.05
-      target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  # Setup 3: Pure Reasoner (requires cognition training)
+  # Input: soft token only → prediction + reasoning (no MLP label at all)
+  llm3: {}
 
   # Setup 4: RLVR-trained (R1-Omni-inspired)
   llm4:
