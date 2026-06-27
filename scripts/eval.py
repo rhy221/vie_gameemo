@@ -306,9 +306,9 @@ def _run_llm_ablation(cfg, args, output_dir: Path) -> dict:
     from vie_gameemo.evaluation.reasoning_eval import format_compliance
 
     llm_setups = {
-        "llm1": "LLM1Explainer (post-hoc, no training)",
-        "llm2": "LLM2CoReasoner (modality-to-text)",
-        "llm3": "LLM3VLMEndToEnd (VLM e2e)",
+        "llm1": "LLM1Explainer (soft token + MLP label, no training)",
+        "llm2": "LLM2CoReasoner (soft token + MLP hint, may override)",
+        "llm3": "LLM3PureReasoner (soft token only)",
         "llm4": "LLM4RLVR (RLVR-trained)",
     }
 
@@ -372,8 +372,13 @@ def _instantiate_llm(cfg, setup_key: str):
             from vie_gameemo.llm.llm2_coreasoner import LLM2CoReasoner
             return LLM2CoReasoner(cfg.llm.base_model.name, quantization=cfg.llm.base_model.quantization)
         elif setup_key == "llm3":
-            from vie_gameemo.llm.llm3_vlm import LLM3VLMEndToEnd
-            return LLM3VLMEndToEnd(quantization=cfg.llm.base_model.quantization)
+            from vie_gameemo.llm.llm3_vlm import LLM3PureReasoner
+            cognition_ckpt = getattr(cfg.llm, "cognition_checkpoint", None)
+            return LLM3PureReasoner(
+                model_name=cfg.llm.base_model.name,
+                quantization=cfg.llm.base_model.quantization,
+                modal_adapter_ckpt=Path(cognition_ckpt) if cognition_ckpt else None,
+            )
         elif setup_key == "llm4":
             from vie_gameemo.llm.llm4_rlvr import LLM4RLVR
             return LLM4RLVR(cfg.llm.base_model.name, quantization=cfg.llm.base_model.quantization)

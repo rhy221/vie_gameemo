@@ -40,6 +40,40 @@ Trả lời theo format:
 class LLM2CoReasoner(BaseLLMReasoner):
     """Co-Reasoner: soft token + MLP label hint → own prediction."""
 
+    @staticmethod
+    def build_prompt(evidence: dict) -> str:
+        """Build a text prompt from evidence dict (used by LLM-4 and train_rlvr).
+
+        Args:
+            evidence: Dict with optional keys: 'face_aus', 'visual_objective',
+                'audio_tone', 'transcript', 'emotion_categories'.
+
+        Returns:
+            Formatted prompt string.
+        """
+        categories = evidence.get(
+            "emotion_categories",
+            ", ".join(_VALID_LABELS),
+        )
+        face_aus = evidence.get("face_aus", "N/A")
+        visual = evidence.get("visual_objective", "N/A")
+        audio_tone = evidence.get("audio_tone", "N/A")
+        transcript = evidence.get("transcript", "")
+        source_language = evidence.get("source_language", "vi")
+
+        return (
+            f"Bằng chứng đa phương thức:\n"
+            f"- Khuôn mặt (Action Units): {face_aus}\n"
+            f"- Cảnh: {visual}\n"
+            f"- Giọng nói: {audio_tone}\n"
+            f"- Lời nói ({source_language}): \"{transcript}\"\n\n"
+            f"Các nhãn có thể: {categories}\n\n"
+            f"Dựa vào bằng chứng trên, hãy phân tích cảm xúc của streamer.\n"
+            f"Trả lời theo format:\n"
+            f"<think>[lý luận 3-5 câu]</think>\n"
+            f"<answer>[một nhãn từ danh sách trên]</answer>"
+        )
+
     def __init__(
         self,
         model_name: str = "Qwen/Qwen2.5-7B-Instruct",

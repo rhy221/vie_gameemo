@@ -124,6 +124,9 @@ def main() -> int:
         enc = enc.to(device)
         encoders["text"] = enc
 
+    strategy = getattr(cfg.visual_encoder, "strategy", "dual_path")
+    logger.info("Visual strategy: %s", strategy)
+
     n_done = 0
     for ann_file in annotation_files:
         clip_id = ann_file.stem
@@ -142,6 +145,8 @@ def main() -> int:
 
         features: dict[str, torch.Tensor] = {}
         has_face = ann.webcam_bbox is not None
+        frame_dir = Path(cfg.paths.frames) / clip_id
+        frame_paths = sorted(frame_dir.glob("frame_*.jpg")) if frame_dir.exists() else []
 
         if "audio" in encoders:
             audio_path = Path(cfg.paths.audios) / f"{clip_id}.wav"
@@ -151,26 +156,40 @@ def main() -> int:
                 logger.warning("Audio file missing: %s", audio_path)
                 features["audio"] = torch.zeros(cfg.audio_encoder.target_tokens, 768)
 
+        import cv2
+        import numpy as np
+
         if "face" in encoders:
-            face_dir = Path(cfg.paths.faces) / clip_id
-            if face_dir.exists():
-                import cv2
-                import numpy as np
-                face_paths = sorted(face_dir.glob("*.jpg"))
-                crops = []
-                for fp in face_paths:
-                    img = cv2.imread(str(fp))
-                    if img is not None:
-                        crops.append(img)
-                feat, _ = encoders["face"].encode(crops if crops else None)
+            if strategy == "full_frame":
+                # Strategy A: full-frame → ViT-FER (no webcam crop)
+                full_crops = [cv2.imread(str(fp)) for fp in frame_paths]
+                full_crops = [c for c in full_crops if c is not None]
+                feat, _ = encoders["face"].encode(full_crops if full_crops else None)
                 features["face"] = feat.squeeze(0)
             else:
-                features["face"] = torch.zeros(1 + encoders["face"].n_temporal_frames, 768)
+                # Strategy B/C: webcam face crops, fallback full-frame
+                face_dir = Path(cfg.paths.faces) / clip_id
+                if has_face and face_dir.exists():
+                    face_files = sorted(face_dir.glob("*.jpg"))
+                    crops = [cv2.imread(str(fp)) for fp in face_files]
+                    crops = [c for c in crops if c is not None]
+                    feat, _ = encoders["face"].encode(crops if crops else None)
+                    features["face"] = feat.squeeze(0)
+                else:
+                    # Fallback: full-frame khi không detect được webcam
+                    logger.warning("Webcam not detected for %s — face encoder fallback to full frames", clip_id)
+                    full_crops = [cv2.imread(str(fp)) for fp in frame_paths]
+                    full_crops = [c for c in full_crops if c is not None]
+                    feat, _ = encoders["face"].encode(full_crops if full_crops else None)
+                    features["face"] = feat.squeeze(0)
 
         if "context" in encoders:
-            frame_dir = Path(cfg.paths.frames) / clip_id
-            frame_paths = sorted(frame_dir.glob("frame_*.jpg")) if frame_dir.exists() else []
-            if has_face and ann.webcam_bbox is not None:
+            if strategy == "face_only":
+                # Strategy B: no context, fill zeros
+                T = 1 if cfg.visual_encoder.context_encoder.temporal_pool == "mean" else cfg.visual_encoder.context_encoder.n_frames
+                features["context"] = torch.zeros(T, 768)
+            elif strategy == "dual_path" and has_face and ann.webcam_bbox is not None:
+                # Strategy C: webcam region crops for context
                 from vie_gameemo.preprocess.face_crop import batch_extract_webcam_regions
                 webcam_crops = batch_extract_webcam_regions(
                     frame_paths, ann.webcam_bbox,
@@ -178,7 +197,9 @@ def main() -> int:
                 )
                 features["context"] = encoders["context"].encode(webcam_crops).squeeze(0)
             else:
-                # Fallback: encode full frames when no webcam detected
+                # full_frame OR dual_path fallback: full frames
+                if strategy == "dual_path":
+                    logger.warning("Webcam not detected for %s — context encoder fallback to full frames", clip_id)
                 features["context"] = encoders["context"].encode_from_paths(frame_paths).squeeze(0)
 
         if "text" in encoders:

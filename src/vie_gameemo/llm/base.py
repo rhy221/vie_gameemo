@@ -33,10 +33,8 @@ class LLMOutput:
 class BaseLLMReasoner(ABC):
     """Abstract base for emotion reasoners.
 
-    Implementations: LLM1Explainer, LLM2CoReasoner, LLM3VLMEndToEnd, LLM4RLVR.
-
-    All methods accept a dict of multimodal evidence and return a structured
-    LLMOutput.
+    Implementations: LLM1Explainer, LLM2CoReasoner, LLM3PureReasoner, LLM4RLVR.
+    All use soft tokens from ModalAdapter (fusion embedding → LLM space).
     """
 
     @abstractmethod
@@ -45,9 +43,10 @@ class BaseLLMReasoner(ABC):
 
         Args:
             evidence: Dict with keys depending on setup:
-                Common: 'transcript', 'face_aus', 'visual_objective', 'audio_tone'
-                LLM-1 also needs: 'label' (predicted by classifier upstream)
-                LLM-3 also needs: 'video_frames', 'audio_path'
+                LLM-1: 'label' + 'fusion_emb' (+ optional 'transcript')
+                LLM-2: 'mlp_label' + 'fusion_emb' (+ optional 'transcript')
+                LLM-3: 'fusion_emb' only
+                LLM-4: 'fusion_emb' only
 
         Returns:
             LLMOutput with reasoning, answer, raw text, and format flag.

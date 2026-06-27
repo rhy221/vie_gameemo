@@ -11,7 +11,7 @@
 > **Đóng góp mới chính:**
 > 1. **Dual-path visual encoding domain-adapted** cho livestream gaming (face crop + context full-frame) — khắc phục hạn chế của approach full-frame paper Emotion-LLaMAv2 khi áp dụng cho domain ngoài talking-head
 > 2. Áp dụng Conv-Attention pre-fusion (mới SOTA 2026) cho 4 modality (audio/face/context/text)
-> 3. So sánh có hệ thống 4 setup LLM (Explainer / Co-Reasoner / VLM end-to-end / **RLVR-trained**)
+> 3. So sánh có hệ thống 4 setup LLM (Explainer / Co-Reasoner / Pure Reasoner / **RLVR-trained**) — tất cả dùng soft token từ ModalAdapter
 > 4. Multi-agent annotation pipeline 100% open-source cho tiếng Việt
 > 5. Curriculum learning Perception→Cognition cho VN emotion domain
 > 6. Benchmark dataset livestream game VN đầu tiên với 4 modality + reasoning annotation
@@ -64,13 +64,15 @@
    │  → spectrogram  │         │  (DOMAIN-ADAPTED)   │         │  → Whisper/        │
    │  → AST encoder  │         │ ┌─────────────────┐ │         │    PhoWhisper ASR  │
    │                 │         │ │ Path 1: FACE    │ │         │  → BARTpho (opt)   │
-   │                 │         │ │ Webcam detect   │ │         │  → XLM-R/PhoBERT   │
-   │                 │         │ │ + crop+ViT-FER  │ │         │    encoder         │
-   │                 │         │ │ → h_face        │ │         │  (config-switched) │
+   │                 │         │ │ Webcam crop     │ │         │  → XLM-R/PhoBERT   │
+   │                 │         │ │ → ViT-FER       │ │         │    encoder         │
+   │                 │         │ │ (fb: full-frame)│ │         │  (config-switched) │
+   │                 │         │ │ → h_face        │ │         │                    │
    │                 │         │ ├─────────────────┤ │         │                    │
    │                 │         │ │ Path 2: CONTEXT │ │         │                    │
-   │                 │         │ │ Full-frame ViT  │ │         │                    │
-   │                 │         │ │ (gameplay info) │ │         │                    │
+   │                 │         │ │ Webcam region   │ │         │                    │
+   │                 │         │ │ → ViT-ImageNet  │ │         │                    │
+   │                 │         │ │ (fb: full-frame)│ │         │                    │
    │                 │         │ │ → h_ctx         │ │         │                    │
    │  → h_audio      │         │ └─────────────────┘ │         │  → h_text          │
    └────────┬────────┘         └──────────┬──────────┘         └─────────┬──────────┘
@@ -94,10 +96,14 @@
               ┌────────▼─────────┐                ┌───────────▼──────────────┐
               │  Stage 4         │                │  Stage 5 · LLM Reasoner  │
               │  Classifier      │                │  4 setup so sánh:        │
-              │  MLP → nhãn      │                │  • LLM-1: Explainer       │
+              │  MLP → nhãn      │                │  • LLM-1: Explainer        │
+              │  (fusion_v1)    │                │    (soft token + nhãn MLP) │
               │                  │                │  • LLM-2: Co-Reasoner     │
-              │                  │                │  • LLM-3: VLM end-to-end  │
+              │                  │                │    (soft token + hint MLP) │
+              │                  │                │  • LLM-3: Pure Reasoner   │
+              │                  │                │    (soft token only)       │
               │                  │                │  • LLM-4: RLVR-trained    │
+              │                  │                │  Tất cả dùng fusion_v2    │
               └──────────────────┘                └───────────────────────────┘
 
          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -115,7 +121,7 @@
 | **Visual encoding** | MediaPipe + crop + ViT (1 path) | **Dual-path: Face crop + Context full-frame** |
 | **Domain adaptation** | Generic | **Livestream gaming-specific** |
 | **Training** | Single-stage joint | **Curriculum 2-stage** (Perception → Cognition) |
-| **LLM setups** | 3 (Explainer/Co-Reasoner/VLM) | **4** (thêm RLVR-trained) |
+| **LLM setups** | 3 (Explainer/Co-Reasoner/VLM) | **4** (Explainer/Co-Reasoner/Pure Reasoner/RLVR) — tất cả dùng soft token |
 | **Annotation** | 2 người manual | **Multi-agent pipeline + human verify** |
 | **Reasoning data** | Không có (hoặc rất ít) | **Auto-generated reasoning** từ multi-agent |
 | **Encoder pairing** | Cố định | **Ablation 5 combinations** |
@@ -128,7 +134,7 @@
 | **0. Data prep** | URL video | Clip + label + reasoning | Multi-agent (Qwen-VL/Audio/72B) | ✅ |
 | **1. Demuxing** | MP4 | audio.wav + frames | ffmpeg | ✅ |
 | **2a. Audio→Spec→Enc** | wav 16kHz | h_audio (768d) | librosa + **AST** | ✅ |
-| **2b. Visual Dual-Path** | frames | h_face + h_ctx (2×768d) | **Webcam detect + ViT-FER + ViT-ImageNet** | ✅ |
+| **2b. Visual Dual-Path** | frames | h_face + h_ctx (2×768d) | **Webcam detect → face crop + webcam region; fallback full-frame; ViT-FER + ViT-ImageNet** | ✅ |
 | **2c. ASR→Text→Enc (v2)** | wav | h_text (768/1024d) | **Whisper bilingual routing + BARTpho(VI) + fastText LID + CafeBERT + adversarial head(opt)** | ✅ |
 | **3. Pre-Fusion** | 4 × 768d | u_fusion (768d) | **Conv-Attention module** | ✅ |
 | **4. Classifier** | u_fusion | label probs | MLP 2-layer | ✅ |
@@ -550,9 +556,14 @@ Thay vì full-frame như paper, dùng **2 path song song**:
     │ Path 1: FACE     │              │ Path 2: CONTEXT  │
     │ (chính)          │              │ (phụ)            │
     │                  │              │                  │
-    │ Webcam detection │              │ Full-frame       │
-    │ → Crop streamer  │              │ → Resize 224x224 │
+    │ Webcam detect    │              │ Webcam region    │
+    │ → Face crop      │              │ (rộng hơn face)  │
     │ → ViT-FER        │              │ → General ViT    │
+    │                  │              │                  │
+    │ Fallback:        │              │ Fallback:        │
+    │ full-frame       │              │ full-frame       │
+    │ (ViT-FER tự xử  │              │                  │
+    │  lý, has_face=F) │              │                  │
     │                  │              │                  │
     │ → h_face (768d)  │              │ → h_ctx (768d)   │
     └──────────────────┘              └──────────────────┘
@@ -564,8 +575,8 @@ Thay vì full-frame như paper, dùng **2 path song song**:
 ```
 
 **Vai trò 2 path:**
-- **Path 1 — Face:** carry chính cho emotion. Clean signal sau khi crop streamer face. Distribution match với ViT-FER pretrain.
-- **Path 2 — Context:** carry thông tin gameplay bổ sung. Vd: "đang fail boss" (frustrated context) vs "đang win" (hype context). Giúp model phân biệt cảm xúc tương tự nhưng context khác (vd: scream khi sợ vs scream khi phấn khích).
+- **Path 1 — Face:** carry chính cho emotion. Khi có webcam: crop face → ViT-FER encode biểu cảm sạch. Khi không có webcam: full-frame → ViT-FER vẫn encode được (output embedding phản ánh "không có biểu cảm rõ"), `has_face=False` guide fusion giảm weight modality này.
+- **Path 2 — Context:** carry thông tin bối cảnh streamer (tư thế, cử chỉ, body language, background webcam). Khi có webcam: crop webcam region (rộng hơn face crop, bao gồm vai, tay, bàn). Khi không có webcam: fallback full-frame.
 
 **Đóng góp đặc thù:** Đây là **adaptation domain-specific** chưa thấy trong literature multimodal emotion recognition cho livestream gaming. Có thể publish như methodological contribution.
 
@@ -577,7 +588,14 @@ Detect vị trí webcam streamer trong frame. Webcam có 2 đặc điểm phân 
 - **Vị trí ổn định** xuyên suốt clip (streamer không di chuyển webcam)
 - **Xuất hiện liên tục**, không sporadic như face NPC
 
-**Implementation:**
+**Implementation (đã cập nhật):**
+
+- Dùng `blaze_face_full_range` (detect mặt nhỏ/xa) thay vì `short_range`
+- Tương thích cả MediaPipe legacy API và Task API mới (>= 0.10.18)
+- Corner-crop fallback: khi full-frame detect miss, crop + upscale 4 góc frame rồi retry
+- Size filter cho clustering: mặt > 25% frame area bị loại khỏi clustering (NPC face), nhưng vẫn accept khi ở cùng vị trí webcam (zoom moments)
+- Expand face bbox → webcam region (~2x ngang, ~2.5x dọc) cho context encoder
+- Config: `min_detection_confidence: 0.4`, `stability_threshold: 0.3`, `eps: 0.08`
 
 ```python
 import mediapipe as mp
@@ -589,11 +607,16 @@ class WebcamDetector:
     """
     Detect webcam region trong livestream frame.
     Phân biệt webcam streamer với face nhân vật game qua spatial stability.
+    Tương thích MediaPipe legacy + Task API.
     """
     def __init__(self):
-        self.mp_face = mp.solutions.face_detection.FaceDetection(
-            min_detection_confidence=0.7
-        )
+        # Auto-detect API version
+        if hasattr(mp, "solutions"):
+            self.mp_face = mp.solutions.face_detection.FaceDetection(
+                min_detection_confidence=0.4, model_selection=1  # full-range
+            )
+        else:
+            self.mp_face = _build_task_api_detector(0.4)  # blaze_face_full_range
     
     def detect_webcam_region(self, clip_path, sample_n=30):
         """
@@ -751,8 +774,8 @@ Path này giữ full-frame để capture gameplay context:
 ```python
 class GameContextEncoder(nn.Module):
     """
-    Path 2: Context encoder cho gameplay scene.
-    Input: full frame (downsampled).
+    Path 2: Context encoder cho vùng webcam (body language, tư thế, bối cảnh gần).
+    Input: webcam region crops (rộng hơn face crop). Fallback: full-frame.
     """
     def __init__(self):
         super().__init__()
@@ -761,21 +784,27 @@ class GameContextEncoder(nn.Module):
             "google/vit-base-patch16-224"  # ImageNet pretrain
         )
     
-    def forward(self, full_frames):
+    def forward(self, webcam_crops):
         """
-        full_frames: 16 frame uniformly sampled, đã resize 224x224
+        webcam_crops: 16 frame webcam region crops, đã resize 224x224
+                      hoặc full-frame nếu không detect được webcam
         """
-        outputs = self.encoder(full_frames)
+        outputs = self.encoder(webcam_crops)
         # CLS token làm context representation
         h_ctx_seq = outputs.last_hidden_state[:, 0]  # [16, 768]
         h_ctx = h_ctx_seq.mean(dim=0, keepdim=True)  # [1, 768]
         return h_ctx
 ```
 
+**Tại sao dùng webcam region cho Path 2 (không phải full-frame gameplay):**
+- Webcam region crop bao quanh streamer: bao gồm **tư thế, cử chỉ tay, body language, background gần** — đây là visual cues quan trọng cho emotion mà face crop bỏ mất
+- Full-frame gameplay (HUD, score, game UI) là noise cho emotion task — ViT-ImageNet không pretrain để hiểu game UI
+- Webcam region cho context sạch hơn, tập trung vào streamer behavior
+
 **Tại sao dùng ViT pretrain ImageNet (không phải ViT-FER) cho Path 2:**
 - Context encoder không cần focus face → ViT-FER waste capacity
-- ImageNet ViT có inductive bias cho scene/object → phù hợp gameplay
-- Pretrain rộng hơn → robust với HUD, UI, character model
+- ImageNet ViT có inductive bias cho scene/object → phù hợp body language, gesture
+- Pretrain rộng hơn → robust với nhiều loại visual context
 
 ### 5.5. Edge Cases Handling
 
@@ -789,20 +818,20 @@ def encode_visual(clip_path):
     webcam_bbox = webcam_detector.detect_webcam_region(clip_path)
     
     if webcam_bbox is None:
-        # No facecam mode: chỉ dùng Path 2 (context)
-        # Audio + text vẫn carry cảm xúc
-        h_face_glo = torch.zeros(1, 768)  # zero placeholder
-        h_face_temp = torch.zeros(1, 768)
-        h_ctx = context_encoder(...)
-        # Flag để model biết face modality missing
-        return h_face_glo, h_face_temp, h_ctx, has_face=False
+        # No facecam: cả 2 path fallback full-frame
+        # ViT-FER vẫn encode được full-frame — output embedding
+        # sẽ phản ánh "không có biểu cảm rõ" thay vì zeros
+        h_face = face_encoder(full_frames)   # ViT-FER tự xử lý
+        h_ctx = context_encoder(full_frames) # full-frame context
+        return h_face, h_ctx, has_face=False
     else:
-        # Normal mode: cả 2 path
-        ...
-        return h_face_glo, h_face_temp, h_ctx, has_face=True
+        # Normal mode: face crop + webcam region crop
+        h_face = face_encoder(face_crops)
+        h_ctx = context_encoder(webcam_region_crops)
+        return h_face, h_ctx, has_face=True
 ```
 
-→ Combine với **modality dropout** trong fusion: model học robust khi face missing.
+`has_face=False` → fusion module giảm weight cho face modality qua modality dropout. ViT-FER vẫn cho output có nghĩa (không bị NaN/zeros), chỉ là embedding ít informative cho emotion.
 
 #### Case 2: Facecam mode (full-screen face)
 
@@ -907,10 +936,10 @@ Sau khi chọn được Strategy (kỳ vọng C), ablate encoder combinations:
 | Aspect | Pipeline cũ (full-frame paper) | Pipeline updated (dual-path) |
 |---|---|---|
 | **Number of paths** | 1 (full-frame) | **2 (face + context)** |
-| **Face handling** | Implicit attention | **Explicit webcam detect + crop** |
-| **Context handling** | Trộn với face | **Tách riêng path 2** |
+| **Face handling** | Implicit attention | **Explicit webcam detect + crop (fallback full-frame, ViT-FER tự xử lý)** |
+| **Context handling** | Trộn với face | **Webcam region crop (body language, tư thế) — tách riêng path 2** |
 | **Domain adaptation** | Không | **Có (livestream-specific)** |
-| **Robustness no-facecam** | OK | **OK với fallback** |
+| **Robustness no-facecam** | OK | **OK — cả 2 path fallback full-frame, has_face=False guide fusion** |
 | **Resist nhân vật game confusion** | **Không** | **Có** |
 | **Đóng góp paper** | Replicate | **Methodological adaptation** |
 
@@ -1337,16 +1366,14 @@ class EmotionClassifier(nn.Module):
 
 ## 9. Stage 5 — LLM Reasoner (4 Setup, Có RLVR)
 
-### 9.0. Modal Adapter — Inference Không Cần Annotation
+### 9.0. Modal Adapter + Dual Fusion Architecture
 
 **File:** `src/vie_gameemo/llm/modal_adapter.py`
 
-Khi không có annotation JSON (clip mới, inference real-time), LLM-2/4 không có text evidence
-(`face_aus`, `visual_objective`, `audio_tone`). **Modal Adapter** giải quyết vấn đề này theo cơ chế
-của Emotion-LLaMAv2 (arXiv:2601.16449, Section 4.4):
+**Tất cả 4 LLM setup đều dùng soft token** từ ModalAdapter — không dùng text descriptions.
 
 ```
-u_fusion (B, T, 768)
+u_fusion_llm (B, T, 768)   ← từ fusion_v2 (riêng cho LLM)
       ↓  ModalAdapter [Linear 768 → d_llm, e.g. 4096]
 soft_token (B, 1, d_llm)   ← mean pool over T
       ↓  concat với instruction text tokens
@@ -1355,51 +1382,62 @@ inputs_embeds (B, 1+L, d_llm)
 <think>[lý luận]</think><answer>LABEL</answer>
 ```
 
-**Không convert thành text** — projection thẳng vào LLM embedding space, LLM attend vào "soft tokens"
-như token thường qua self-attention.
+#### Dual Fusion — 2 fusion riêng biệt
 
-**Được train** trong Stage 2 (Cognition): `ModalAdapter` + `LLM LoRA` cùng tối ưu trên reasoning data.
-Saved tại `outputs/checkpoints/cognition_best.pt["llm_adapter"]`.
+MLP và LLM dùng **2 fusion khác nhau**, cùng khởi tạo từ perception checkpoint nhưng fine-tune riêng:
 
-**Dispatch logic trong LLM-2/4:**
-```python
-if "fusion_emb" in evidence and self.modal_adapter is not None:
-    return self._reason_with_embeddings(evidence["fusion_emb"])  # annotation-free
-return self._reason_with_text(evidence)                          # cần annotation
+```
+perception_best.pt      → fusion_v1 (tối ưu cho MLP classifier)
+llm_perception_best.pt  → fusion_v2 (tối ưu cho LLM) + ModalAdapter + LLM LoRA
 ```
 
-**Input lookup khi inference:**
+**Lý do:** Fusion tối ưu cho MLP (nén thành 8 classes) có thể mất nuance mà LLM cần để reasoning.
+Fusion_v2 được init warm từ fusion_v1 rồi fine-tune thêm với lr thấp (2e-5).
 
-| Tình huống | Evidence dict | LLM path |
+#### Checkpoints
+
+| File | Nội dung | Dùng cho |
 |---|---|---|
-| Có annotation JSON | `face_aus`, `visual_objective`, `audio_tone`, `transcript` | Text evidence |
-| Không có annotation | `fusion_emb` (tensor từ `_forward()`) | Modal Adapter soft tokens |
-
-**Config:** đặt `llm.cognition_checkpoint: "outputs/checkpoints/cognition_best.pt"` trong `config.yaml`
-sau khi train Stage 2 để enable annotation-free path.
+| `perception_best.pt` | fusion_v1 + MLP classifier | MLP predict nhãn |
+| `llm_perception_best.pt` | fusion_v2 + ModalAdapter + LLM LoRA | LLM-1/2/3/4 soft token |
+| `cognition_best.pt` | (optional) ModalAdapter + LLM LoRA trained với reasoning text (fusion frozen từ Stage 2a) | Cải thiện chất lượng giải thích |
 
 ---
 
-### 9.1. Tổng quan 4 setup
+### 9.1. Tổng quan 4 setup — mức độ tự chủ tăng dần
 
-| Setup | Vai trò LLM | Training | Input nguồn nào | Annotation-free? |
+| Setup | Input | Output | Training | Quyết định nhãn? |
 |---|---|---|---|---|
-| **LLM-1: Post-hoc Explainer** | Giải thích sau prediction | No training | Label + text evidence | ❌ Cần label/evidence |
-| **LLM-2: Co-Reasoner** | Tham gia inference | Optional SFT + Modal Adapter | Text evidence **hoặc fusion_emb** | ✅ Nếu có cognition ckpt |
-| **LLM-3: VLM End-to-End** | Backbone đa phương thức | LoRA fine-tune | Raw frames + audio | ✅ Luôn luôn |
-| **LLM-4: RLVR-trained (MỚI)** | Reinforcement learning | Cold start + GRPO + Modal Adapter | Text evidence **hoặc fusion_emb** | ✅ Nếu có cognition ckpt |
+| **LLM-1: Explainer** | soft token + nhãn MLP | Giải thích | Không (zero-shot) | ❌ Luôn trả về nhãn MLP |
+| **LLM-2: Co-Reasoner** | soft token + nhãn MLP (hint) | Reasoning + nhãn | LLM Perception | ✅ Có thể override MLP |
+| **LLM-3: Pure Reasoner** | soft token only | Reasoning + nhãn | LLM Perception | ✅ Tự dự đoán hoàn toàn |
+| **LLM-4: RLVR-trained** | soft token only | Reasoning + nhãn | LLM Perception + RLVR | ✅ Tự dự đoán + structured |
 
-### 9.2. Setup LLM-1 — Post-hoc Explainer
+**Quan trọng:** Tất cả LLM đều chỉ cần **GT labels** để train LLM Perception. Annotated descriptions
+(từ multi-agent pipeline) chỉ cần cho Cognition training (optional, cải thiện reasoning quality).
 
-Giữ nguyên như pipeline cũ. Qwen2.5-7B q4 nhận label + features → sinh giải thích VN.
+### 9.2. Setup LLM-1 — Explainer (không train)
 
-### 9.3. Setup LLM-2 — Co-Reasoner
+**File:** `src/vie_gameemo/llm/llm1_explainer.py`
 
-Modality-to-text + LLM tổng hợp. Có thể optional fine-tune với reasoning data từ multi-agent.
+Nhận nhãn MLP + soft token → giải thích tại sao nhãn đúng. **Không bao giờ override nhãn MLP.**
 
-### 9.4. Setup LLM-3 — VLM End-to-End
+- Nếu có ModalAdapter (đã train LLM Perception): dùng soft token — chất lượng tốt
+- Nếu chưa có: fallback text-only prompt (chỉ có nhãn + transcript — chất lượng kém)
 
-Qwen2.5-VL-7B + LoRA fine-tune trên Vie-GameEmo.
+### 9.3. Setup LLM-2 — Co-Reasoner (train LLM Perception)
+
+**File:** `src/vie_gameemo/llm/llm2_coreasoner.py`
+
+Nhận nhãn MLP như **gợi ý** + soft token → tự reasoning → có thể đồng ý hoặc override nhãn MLP.
+Prompt nói rõ "đây chỉ là gợi ý — có thể đúng hoặc sai".
+
+### 9.4. Setup LLM-3 — Pure Reasoner (train LLM Perception)
+
+**File:** `src/vie_gameemo/llm/llm3_vlm.py` (đã đổi từ VLM sang Pure Reasoner)
+
+Chỉ nhận soft token, **không biết nhãn MLP** → tự dự đoán hoàn toàn từ fusion embedding.
+Đây là test thực sự: LLM có học được emotion signal từ soft token không?
 
 ### 9.5. Setup LLM-4 — RLVR-Trained (MỚI)
 
@@ -1531,14 +1569,16 @@ phương thức dẫn đến kết luận]
 
 ### 9.6. Bảng So Sánh 4 Setup
 
-| Aspect | LLM-1 | LLM-2 | LLM-3 | **LLM-4 (RLVR)** |
+| Aspect | LLM-1 (Explainer) | LLM-2 (Co-Reasoner) | LLM-3 (Pure Reasoner) | **LLM-4 (RLVR)** |
 |---|---|---|---|---|
-| Compute (train) | 0 | Low | High | **Highest** |
-| Reasoning quality | Trung bình | Cao | Cao | **Cao + structured** |
-| Classification accuracy | N/A | Trung bình | Cao | **Cao nhất kỳ vọng** |
-| OOD generalization | N/A | Trung bình | Trung bình | **+10-15%** (R1-Omni finding) |
-| Explainability | Có | Cao | Cao | **Có + verifiable** |
-| Cần A100? | Không | Không | Có (LoRA) | **Có hoặc 0.5B model** |
+| Input | soft token + nhãn MLP | soft token + nhãn hint | soft token only | soft token only |
+| Quyết định nhãn | Không (giải thích) | Có (override MLP) | Có (tự dự đoán) | Có (tự dự đoán) |
+| Training cần | Không (hoặc LLM Perception cho soft token) | LLM Perception | LLM Perception | LLM Perception + RLVR |
+| Data cần | GT labels | GT labels | GT labels | GT labels |
+| Compute (train) | 0 | Low | Low | **Highest** |
+| Reasoning quality | Trung bình (zero-shot) | Cao | Cao | **Cao + structured** |
+| OOD generalization | N/A | Trung bình | Trung bình | **+10-15%** (R1-Omni) |
+| Cần A100? | Không | Không | Không | **Có hoặc 0.5B model** |
 
 ### 9.7. Câu Hỏi Nghiên Cứu (Cập nhật)
 
@@ -1552,9 +1592,9 @@ phương thức dẫn đến kết luận]
 
 ---
 
-## 10. Perception-to-Cognition Curriculum Training (MỚI)
+## 10. Perception-to-Cognition Curriculum Training (CẬP NHẬT)
 
-**Lấy ý tưởng từ Emotion-LLaMAv2.** Thay vì train classifier + LLM cùng lúc, chia thành 2 stage.
+**Lấy ý tưởng từ Emotion-LLaMAv2, mở rộng thành 3 stage** với dual fusion architecture.
 
 ### 10.1. Lý do dùng Curriculum
 
@@ -1568,46 +1608,81 @@ Theo paper Emotion-LLaMAv2 (Table 10):
 
 → Curriculum **vượt 3.4% so với joint training** trên MER-UniBench.
 
-### 10.2. 2-Stage Training Schedule
+### 10.2. 3-Stage Training Schedule
 
-#### Stage 1 — Perception (Recognition Only)
+#### Stage 1 — MLP Perception (Recognition Only)
 
-**Mục tiêu:** Align multimodal embeddings với emotion label space.
+**Mục tiêu:** Align multimodal embeddings với emotion label space qua MLP classifier.
 
 **Training data:** Tất cả clip với chỉ emotion label, không cần reasoning.
 
-**Loss:** Cross-entropy hoặc Focal Loss cho classifier.
+**Loss:** Focal Loss cho classifier.
 
 **Training:**
 - Frozen encoders (AST, ViT, XLM-R)
-- Trainable: Conv-Attention + Classifier MLP
+- Trainable: Conv-Attention fusion_v1 + Classifier MLP
 - LR: 2e-4
 - Epochs: 30
 - Batch: 16 (effective với grad accumulation)
 
-**Endpoint:** Emotion-LLaMAv2 paper báo cáo accuracy ~78% trên MER-UniBench sau Stage 1.
+**Output:** `perception_best.pt` (fusion_v1 + MLP)
 
-#### Stage 2 — Cognition (Joint Recognition + Reasoning)
+#### Stage 2a — LLM Perception (Align Soft Token → Predict Nhãn)
 
-**Mục tiêu:** Học LLM sinh reasoning trong khi vẫn giữ accuracy classification.
+**Mục tiêu:** Train ModalAdapter + LLM LoRA + fusion_v2 để LLM hiểu soft token và predict nhãn.
 
-**Training data:** Subset clip có reasoning annotation (từ multi-agent pipeline).
+**Training data:** Chỉ cần GT labels — **KHÔNG cần annotated descriptions.**
+
+**Loss:** Language modeling loss trên `<answer>{gt_label}</answer>`.
+
+**Training:**
+- Frozen encoders
+- Trainable: fusion_v2 (init từ fusion_v1, lr thấp 2e-5) + ModalAdapter + LLM LoRA
+- MLP classifier: frozen (chỉ dùng cho LLM-2 hint)
+- LR LLM: theo config cognition
+- Epochs: 10
+
+**Dual fusion:** fusion_v2 được init warm từ fusion_v1 (MLP perception) rồi fine-tune riêng cho LLM.
+Fusion_v1 trong `perception_best.pt` không bị ảnh hưởng.
+
+**Output:** `llm_perception_best.pt` (fusion_v2 + ModalAdapter + LLM LoRA)
+
+**Sau stage này:** LLM-1/2/3 đều hoạt động được:
+- LLM-1: giải thích nhãn MLP (zero-shot reasoning ability)
+- LLM-2: co-reason với MLP hint, có thể override
+- LLM-3: predict + reason thuần từ soft token
+
+#### Stage 2b — Cognition (Optional, Joint Recognition + Reasoning)
+
+**Mục tiêu:** Củng cố chất lượng reasoning — LLM learn generate giải thích mạch lạc.
+
+**Training data:** Cần annotated descriptions từ multi-agent pipeline (Stage 0 notebook 01).
 
 **Loss:** Multi-task:
 ```
 L = α * L_classification + β * L_reasoning_LM
 ```
-trong đó:
-- `L_classification`: cross-entropy của classifier (giữ accuracy)
-- `L_reasoning_LM`: language modeling loss của LLM trên reasoning text
-- α, β: weights (recommend α=1.0, β=0.5)
+- `L_classification`: cross-entropy (giữ accuracy)
+- `L_reasoning_LM`: language modeling loss trên reasoning text target
+- α=1.0, β=0.5
 
 **Training:**
-- Encoders + Conv-Attention frozen (đã train Stage 1)
-- Trainable: LLM adapter + LoRA (rank=16, alpha=32)
-- LR: 2e-5 (10x lower vì fine-tune)
+- Frozen: fusion (dùng fusion_v2 từ Stage 2a nếu có, otherwise fusion_v1), classifier
+- Trainable: ModalAdapter + LLM LoRA (warm-start từ Stage 2a nếu có)
+- LR: 2e-5
 - Epochs: 10-15
 - Batch: 4-8
+
+**Evaluation:** Đánh giá **cả nhãn dự đoán và chất lượng suy luận** của LLM:
+- LLM label prediction: parse `<answer>` → macro_f1, UAR (giống Stage 2a)
+- Format compliance: tỷ lệ output đúng `<think>...<answer>...`
+- Best checkpoint chọn theo llm_macro_f1
+
+**Output:** `cognition_best.pt` (ModalAdapter + LLM LoRA)
+
+**Khi nào cần:** Chỉ khi có thời gian annotate descriptions cho dataset. Stage 2a đã đủ cho LLM predict + explain (zero-shot).
+
+**Lưu ý:** Nếu chạy Stage 2b sau 2a, dùng `--llm-perception-ckpt` để warm-start từ adapter/LoRA đã train ở Stage 2a, tránh học lại từ đầu.
 
 ### 10.3. Implementation Skeleton
 
@@ -1701,15 +1776,37 @@ for epoch in range(30):
 torch.save(model.state_dict(), "checkpoint_stage1.pt")
 
 
-# === Stage 2 Training ===
-# Load LLM and adapter
+# === Stage 2a — LLM Perception (chỉ cần GT labels) ===
+# Load LLM and adapter, fusion_v2 trainable
 model.llm = load_qwen_with_lora()
 model.llm_adapter = nn.Linear(768, model.llm.config.hidden_size)
 
 optimizer = torch.optim.AdamW([
+    {'params': model.fusion.parameters(), 'lr': 2e-5},  # fusion_v2 fine-tune cho LLM
     {'params': model.llm.parameters(), 'lr': 2e-5},
     {'params': model.llm_adapter.parameters(), 'lr': 2e-4},
-    # Conv-Attention frozen sau Stage 1
+    # Classifier frozen (chỉ dùng cho LLM-2 hint)
+])
+
+for epoch in range(10):
+    for batch in train_loader:
+        # Forward: fusion_v2 → adapter → LLM → predict label
+        # Loss: LM loss trên <answer>{gt_label}</answer>
+        ...
+
+# Save: fusion_v2 + adapter + LoRA
+torch.save({...}, "llm_perception_best.pt")
+
+
+# === Stage 2b — Cognition (optional, cần reasoning text) ===
+# Fusion frozen (dùng fusion_v2 từ Stage 2a)
+# Warm-start adapter + LoRA từ Stage 2a
+for p in model.fusion.parameters(): p.requires_grad = False
+
+optimizer = torch.optim.AdamW([
+    {'params': model.llm.parameters(), 'lr': 2e-5},
+    {'params': model.llm_adapter.parameters(), 'lr': 2e-4},
+    # Fusion frozen
 ])
 
 for epoch in range(10):
@@ -1724,6 +1821,8 @@ for epoch in range(10):
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
+
+# Eval: LLM label prediction + reasoning quality (không dùng MLP eval)
 ```
 
 ### 10.4. Ablation Curriculum
@@ -1833,23 +1932,34 @@ config = GRPOConfig(
 ### 11.3. Curriculum Training Checkpoint Strategy
 
 ```python
-# Stage 1 và Stage 2 lưu checkpoint khác nhau
+# Stage 1: MLP Perception
 checkpoint_stage1 = {
-    'fusion': model.fusion.state_dict(),
-    'classifier': model.classifier.state_dict(),
-    'optimizer': optimizer.state_dict(),
+    'fusion_state_dict': model.fusion.state_dict(),    # fusion_v1
+    'classifier_state_dict': model.classifier.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
     'epoch': 30,
-    'stage': 1
 }
+# → perception_best.pt
 
-checkpoint_stage2 = {
-    'fusion': model.fusion.state_dict(),  # frozen sau S1
-    'classifier': model.classifier.state_dict(),  # frozen sau S1
+# Stage 2a: LLM Perception (fusion_v2 trainable)
+checkpoint_stage2a = {
+    'fusion_state_dict': model.fusion.state_dict(),    # fusion_v2 (fine-tuned for LLM)
     'llm_adapter': model.llm_adapter.state_dict(),
-    'llm_lora': get_peft_model_state_dict(model.llm),
+    'llm_peft': model.llm.state_dict(),                # LoRA weights
     'epoch': 10,
-    'stage': 2
+    'best_metric': best_llm_f1,
 }
+# → llm_perception_best.pt
+
+# Stage 2b: Cognition (fusion frozen, adapter+LoRA warm-start từ 2a)
+checkpoint_stage2b = {
+    'llm_adapter': model.llm_adapter.state_dict(),     # refined from Stage 2a
+    'llm_peft': model.llm.state_dict(),                # refined LoRA
+    'epoch': 10,
+    'best_metric': best_llm_f1,
+    # fusion không save vì frozen — dùng fusion_v2 từ llm_perception_best.pt
+}
+# → cognition_best.pt
 ```
 
 ### 11.4. Các tips giữ nguyên từ pipeline cũ

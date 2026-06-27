@@ -458,7 +458,23 @@ training:
       monitor: "val_macro_f1"
       mode: "max"
 
-  # Stage 2: Cognition (joint classification + reasoning)
+  # Stage 2a: LLM Perception (align soft token → predict label)
+  # Only needs GT labels, no annotated descriptions.
+  llm_perception:
+    epochs: 10
+    batch_size: 4
+    gradient_accumulation: 8
+    learning_rate:
+      fusion: 2.0e-5            # fine-tune fusion_v2 for LLM (dual-fusion)
+      llm: 2.0e-5
+      llm_adapter: 2.0e-4
+    lora:
+      enabled: true
+      rank: 16
+      alpha: 32
+      target_modules: ["q_proj", "v_proj"]
+
+  # Stage 2b: Cognition (joint classification + reasoning)
   cognition:
     epochs: 10
     batch_size: 4

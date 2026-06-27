@@ -1,0 +1,205 @@
+================================================================================
+Vie-GameEmo — Danh sách thử nghiệm (29 experiments)
+Trích từ pipeline_implementation_detailed (2).md
+Cập nhật: 2026-06-27
+================================================================================
+
+================================================================================
+STAGE 0 — Data Preparation
+================================================================================
+#1  Schema: Ekman 7 vs Gaming 8
+    Mục đích: Schema nào phù hợp hơn cho domain gaming livestream
+    Status: [ ]
+
+#2  Annotation: Multi-agent vs Manual
+    Mục đích: Đo quality gap giữa auto annotation và human annotation
+    Status: [ ]
+
+#3  Consolidator model: Qwen2.5-32B vs 72B
+    Mục đích: Cần model lớn cho consolidator không
+    Status: [ ]
+
+================================================================================
+STAGE 2a — Audio Encoder
+================================================================================
+#4  Audio encoder: AST vs Wav2Vec2 vs HuBERT
+    Mục đích: Encoder nào tốt nhất cho game audio (tiếng nói + SFX)
+    Status: [ ]
+
+#5  Audio tokens: 1/2/4/8/16/32/64/128
+    Mục đích: Tìm sweet spot số audio tokens
+    Status: [ ]
+
+================================================================================
+STAGE 2b — Visual Encoder (KEY EXPERIMENTS)
+================================================================================
+#6  [KEY] Visual strategy: A (full-frame) vs B (face only) vs C (dual-path)
+    Mục đích: Validate dual-path tốt nhất cho domain gaming
+    Config: visual_encoder.strategy = full_frame | face_only | dual_path
+    Status: [ ]
+
+#7  [KEY] Per-genre breakdown: A/B/C × {MOBA, FPS, Horror, RPG, Casual}
+    Mục đích: Show full-frame suffer ở Horror/RPG (NPC face dominate)
+    Status: [ ]
+
+#8  Webcam detection accuracy (trên toàn bộ dataset)
+    Mục đích: Validate detector — bao nhiêu % clips detect đúng webcam
+    Status: [ ]
+
+#9  No-facecam handling: subset clips không có webcam
+    Mục đích: Test fallback full-frame khi webcam không detect được
+    Status: [ ]
+
+#10 Visual encoder pairing: 5 combinations face/context encoder
+    Mục đích: Tìm synergy tốt nhất giữa face encoder và context encoder
+    Status: [ ]
+
+#11 Number of frames: 1/2/4/8/16/32/64
+    Mục đích: Tìm sweet spot số frames sample
+    Status: [ ]
+
+#12 Spatial pooling: 1x1/2x2/4x4/8x8
+    Mục đích: Best granularity cho face encoder patches
+    Status: [ ]
+
+#13 Face crop margin: 0.1/0.2/0.3
+    Mục đích: Bao nhiêu context xung quanh face là tối ưu
+    Status: [ ]
+
+================================================================================
+STAGE 2c — Text Encoder (KEY v2 — Bilingual)
+================================================================================
+#14 ASR: Whisper-v3 vs PhoWhisper
+    Mục đích: ASR nào tốt hơn cho code-switching VI+EN
+    Status: [ ]
+
+#15 Text encoder: CafeBERT vs XLM-R-base vs PhoBERT
+    Mục đích: Encoder nào phù hợp nhất cho bilingual dataset
+    Status: [ ]
+
+#16 [KEY] Language handling: A1 (VI-only) / A2 (Mixed) / A3 (Mixed+adversarial) /
+    A4 (Translate→VI) / A5 (Translate→EN)
+    Mục đích: Bilingual novelty contribution — cách xử lý song ngữ tốt nhất
+    Status: [ ]
+
+#17 Language-adversarial head: On vs Off (λ=0.05/0.1/0.2)
+    Mục đích: GRL có giảm embedding fragmentation giữa VI và EN không
+    Status: [ ]
+
+#18 Per-language eval: F1 trên test-VI vs test-EN
+    Mục đích: Kiểm tra VI có bị bóp performance khi train mixed không
+    Status: [ ]
+
+#19 Fragmentation diagnostic: t-SNE h_text trước/sau fine-tune/adversarial
+    Mục đích: Quantify mức độ language separation trong embedding space
+    Status: [ ]
+
+================================================================================
+STAGE 3 — Fusion
+================================================================================
+#20 Pre-fusion: Late/Early/MULT/Q-Former/Conv/Attn/Conv-Attn 4M
+    Mục đích: Validate Conv-Attn tốt nhất cho 4 modality
+    Status: [ ]
+
+#21 Modality dropout: p=0 vs 0.1 vs 0.3
+    Mục đích: Robustness khi modality missing (no-facecam)
+    Status: [ ]
+
+#22 Attention weight visualization: plot weights theo timeline + genre
+    Mục đích: Interpretability — model focus vào modality nào khi nào
+    Status: [ ]
+
+================================================================================
+STAGE 4 — Classifier
+================================================================================
+#23 Loss: CE vs Weighted CE vs Focal
+    Mục đích: Xử lý class imbalance (neutral 20% vs disgusted 7%)
+    Status: [ ]
+
+================================================================================
+STAGE 5 — LLM (KEY EXPERIMENTS)
+================================================================================
+#24 [KEY] LLM setup: LLM-1 (Explainer) vs LLM-2 (Co-Reasoner) vs
+    LLM-3 (Pure Reasoner) vs LLM-4 (RLVR)
+    Mục đích: So sánh mức độ tự chủ của LLM — giải thích vs co-reason vs tự predict
+    Input:
+      LLM-1: soft token + nhãn MLP → giải thích (không override)
+      LLM-2: soft token + nhãn MLP (hint) → có thể override
+      LLM-3: soft token only → tự dự đoán hoàn toàn
+      LLM-4: soft token only + RLVR training
+    Status: [ ]
+
+#25 LLM choice: Qwen2.5-7B vs SeaLLM vs Vistral
+    Mục đích: LLM nào tốt nhất cho Vietnamese reasoning
+    Status: [ ]
+
+#26 [KEY] RLVR vs SFT: LLM-4 (RLVR) vs LLM-3 (SFT-only)
+    Mục đích: RLVR có generalize tốt hơn SFT không, gap bao nhiêu
+    Expected: +10-15% OOD (theo R1-Omni paper)
+    Status: [ ]
+
+#27 [KEY] OOD generalization: test trên kênh streamer mới
+    Mục đích: R1-Omni-style eval — model có generalize cho unseen streamers không
+    Status: [ ]
+
+================================================================================
+CROSS-STAGE
+================================================================================
+#28 Training scheme: Single joint vs Curriculum (3 stages)
+    Mục đích: Validate curriculum learning
+    3 stages: MLP Perception → LLM Perception → Cognition (optional)
+    Status: [ ]
+
+#29 Modality ablation: A/F/C/T riêng và combinations
+    Mục đích: Đóng góp của từng modality trong 4-modality fusion
+    Combinations: A, F, C, T, AF, AC, AT, FC, FT, CT, AFC, AFT, ACT, FCT, AFCT
+    Status: [ ]
+
+================================================================================
+RESEARCH QUESTIONS
+================================================================================
+RQ1: Trong 4 setup LLM, setup nào cho classification accuracy cao nhất?
+RQ2: Setup nào có human eval score cao nhất về explanation quality?
+RQ3: RLVR có thực sự generalize tốt hơn SFT trên OOD data trong domain VN không?
+RQ4: RLVR có giảm hallucination trong reasoning không?
+
+================================================================================
+METRICS
+================================================================================
+Quantitative (Stage 4):
+  - Accuracy, Weighted-F1 (WAF), Macro-F1, UAR (Unweighted Average Recall)
+  - Per-class F1
+  - Confusion matrix
+
+Reasoning (Stage 5):
+  - Clue Overlap, Label Overlap scores (EMER-style)
+  - Human eval Likert 1-5: chính xác, thuyết phục, chi tiết
+  - Cohen's κ giữa 3 reviewer
+
+Generalization:
+  - In-distribution: Vie-GameEmo test split
+  - Out-of-distribution: clips từ streamer chưa thấy trong train
+  - Cross-genre: train MOBA+FPS, test Horror+RPG
+
+Efficiency:
+  - Inference time per clip (batch và real-time)
+  - VRAM peak
+  - Training time mỗi stage
+
+================================================================================
+CHECKPOINTS
+================================================================================
+perception_best.pt      → fusion_v1 + MLP classifier
+llm_perception_best.pt  → fusion_v2 + ModalAdapter + LLM LoRA
+cognition_best.pt       → (optional) fusion + ModalAdapter + LLM LoRA (với reasoning)
+
+================================================================================
+NOTEBOOK CELLS
+================================================================================
+CELL 9:   Stage 1  — MLP Perception (train fusion_v1 + MLP)
+CELL 11:  Stage 2a — LLM Perception (train fusion_v2 + ModalAdapter + LLM LoRA)
+CELL 11a: Stage 2b — Cognition (optional, cần annotated descriptions)
+CELL 10c: Demo LLM-1 (Explainer)
+CELL 11b: Demo LLM-2 (Co-Reasoner)
+CELL 11c: Demo LLM-3 (Pure Reasoner)
+CELL 12:  RLVR (LLM-4, optional)
