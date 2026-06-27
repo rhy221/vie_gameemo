@@ -127,6 +127,14 @@ def main() -> int:
     strategy = getattr(cfg.visual_encoder, "strategy", "dual_path")
     logger.info("Visual strategy: %s", strategy)
 
+    # Load webcam bboxes from stage0_preprocess (separate from annotations)
+    webcam_bboxes: dict[str, dict | None] = {}
+    webcam_bbox_file = Path(cfg.paths.processed) / "webcam_bboxes.json"
+    if webcam_bbox_file.exists():
+        import json as _json
+        webcam_bboxes = _json.loads(webcam_bbox_file.read_text(encoding="utf-8"))
+        logger.info("Loaded %d webcam bboxes from %s", len(webcam_bboxes), webcam_bbox_file)
+
     n_done = 0
     for ann_file in annotation_files:
         clip_id = ann_file.stem
@@ -144,7 +152,18 @@ def main() -> int:
             continue
 
         features: dict[str, torch.Tensor] = {}
-        has_face = ann.webcam_bbox is not None
+        # Resolve webcam bbox: annotation first, then webcam_bboxes.json fallback
+        resolved_bbox = ann.webcam_bbox
+        if resolved_bbox is None and clip_id in webcam_bboxes and webcam_bboxes[clip_id] is not None:
+            bbox_dict = webcam_bboxes[clip_id]
+            from vie_gameemo.preprocess.webcam_detector import WebcamBBox as DetectorBBox
+            resolved_bbox = DetectorBBox(
+                xmin=bbox_dict["xmin"], ymin=bbox_dict["ymin"],
+                width=bbox_dict["width"], height=bbox_dict["height"],
+                stability_score=bbox_dict.get("stability_score", 0.0),
+                edge_distance=bbox_dict.get("edge_distance", 0.0),
+            )
+        has_face = resolved_bbox is not None
         frame_dir = Path(cfg.paths.frames) / clip_id
         frame_paths = sorted(frame_dir.glob("frame_*.jpg")) if frame_dir.exists() else []
 
@@ -188,11 +207,11 @@ def main() -> int:
                 # Strategy B: no context, fill zeros
                 T = 1 if cfg.visual_encoder.context_encoder.temporal_pool == "mean" else cfg.visual_encoder.context_encoder.n_frames
                 features["context"] = torch.zeros(T, 768)
-            elif strategy == "dual_path" and has_face and ann.webcam_bbox is not None:
+            elif strategy == "dual_path" and has_face and resolved_bbox is not None:
                 # Strategy C: webcam region crops for context
                 from vie_gameemo.preprocess.face_crop import batch_extract_webcam_regions
                 webcam_crops = batch_extract_webcam_regions(
-                    frame_paths, ann.webcam_bbox,
+                    frame_paths, resolved_bbox,
                     target_size=tuple(cfg.visual_encoder.context_encoder.target_size),
                 )
                 features["context"] = encoders["context"].encode(webcam_crops).squeeze(0)
