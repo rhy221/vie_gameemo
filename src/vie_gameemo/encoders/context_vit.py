@@ -1,16 +1,12 @@
-"""Webcam context encoder using ViT-ImageNet (Path 2 of dual-path visual).
+"""Context encoder using ViT-ImageNet (Path 2 of dual-path visual).
 
-Encodes the streamer's webcam region (NOT tight face crop) using a generic
-ViT pretrained on ImageNet. This captures broader cues than the face encoder:
-    - Body language / posture
-    - Webcam background / lighting changes
-    - Upper-body gestures
-
-Together with Path 1 (face encoder, tight crop), this gives the model both
-fine-grained facial expression AND wider streamer context.
+Prefers webcam region crops (body language, posture, background) when a
+webcam is detected. Falls back to full frames when no webcam is found,
+so the context modality is never all-zeros.
 """
 
 import logging
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -82,6 +78,37 @@ class ContextEncoder(nn.Module):
             return stacked.mean(dim=0, keepdim=True).unsqueeze(0)  # (1, 1, 768)
         else:
             return stacked.unsqueeze(0)  # (1, n_frames, 768)
+
+    @torch.no_grad()
+    def encode_from_paths(self, frame_paths: list[Path]) -> Tensor:
+        """Encode full frames from file paths (fallback when no webcam detected).
+
+        Args:
+            frame_paths: Paths to extracted frame images.
+
+        Returns:
+            Tensor of shape (1, T, 768).
+        """
+        if not frame_paths:
+            T = 1 if self.temporal_pool == "mean" else self.n_frames
+            return torch.zeros(1, T, 768, device=self.device)
+
+        sampled = _uniform_sample(list(frame_paths), self.n_frames)
+        cls_tokens = []
+        for fp in sampled:
+            image = Image.open(fp).convert("RGB")
+            inputs = self.processor(images=image, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            outputs = self.model(**inputs)
+            cls = outputs.last_hidden_state[:, 0, :]
+            cls_tokens.append(cls)
+
+        stacked = torch.cat(cls_tokens, dim=0)
+
+        if self.temporal_pool == "mean":
+            return stacked.mean(dim=0, keepdim=True).unsqueeze(0)
+        else:
+            return stacked.unsqueeze(0)
 
     @torch.no_grad()
     def encode_batch(

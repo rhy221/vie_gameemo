@@ -218,7 +218,7 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
         webcam_crops = batch_extract_webcam_regions(frame_paths, webcam_bbox)
         features["context"] = ctx_enc.encode(webcam_crops)
     else:
-        features["context"] = ctx_enc.encode(None)
+        features["context"] = ctx_enc.encode_from_paths(frame_paths)
     del ctx_enc
 
     from vie_gameemo.encoders.text_xlmr import XLMRTextEncoder

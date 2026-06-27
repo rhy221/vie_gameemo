@@ -270,15 +270,15 @@ visual_encoder:
   # Webcam region detection (separates streamer face from in-game NPC faces)
   webcam_detector:
     backend: "mediapipe"
-    min_detection_confidence: 0.7
+    min_detection_confidence: 0.4
     sample_n_frames: 30          # frames sampled to find stable region
     clustering:
       method: "dbscan"
-      eps: 0.05
-      min_samples: 5
-    stability_threshold: 0.5     # cluster_size / sample_n
+      eps: 0.08
+      min_samples: 3
+    stability_threshold: 0.3     # cluster_size / sample_n (lowered for small webcams)
     edge_bias: 0.3               # webcam usually within 0.3 of edges
-    fallback: "no_face"          # if detection fails entirely
+    fallback: "full_frame"       # full_frame = context encoder uses full frames when no webcam
 
   # Path 1: face encoder (streamer face only)
   face_encoder:

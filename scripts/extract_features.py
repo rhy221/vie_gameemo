@@ -198,18 +198,18 @@ def main() -> int:
                 features["face"] = torch.zeros(1 + encoders["face"].n_temporal_frames, 768)
 
         if "context" in encoders:
+            frame_dir = Path(cfg.paths.frames) / clip_id
+            frame_paths = sorted(frame_dir.glob("frame_*.jpg")) if frame_dir.exists() else []
             if has_face and ann.webcam_bbox is not None:
                 from vie_gameemo.preprocess.face_crop import batch_extract_webcam_regions
-
-                frame_dir = Path(cfg.paths.frames) / clip_id
-                frame_paths = sorted(frame_dir.glob("frame_*.jpg")) if frame_dir.exists() else []
                 webcam_crops = batch_extract_webcam_regions(
                     frame_paths, ann.webcam_bbox,
                     target_size=tuple(cfg.visual_encoder.context_encoder.target_size),
                 )
                 features["context"] = encoders["context"].encode(webcam_crops).squeeze(0)
             else:
-                features["context"] = encoders["context"].encode(None).squeeze(0)
+                # Fallback: encode full frames when no webcam detected
+                features["context"] = encoders["context"].encode_from_paths(frame_paths).squeeze(0)
 
         if "text" in encoders:
             transcript = ann.transcript or ""

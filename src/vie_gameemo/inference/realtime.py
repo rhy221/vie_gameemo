@@ -250,7 +250,16 @@ class RealtimeInferenceRunner:
                         crops.append(extract_webcam_region(arr, self.cached_webcam_bbox))
                 tensor = enc.encode(crops)
             else:
-                tensor = enc.encode(None)
+                # No webcam — encode raw frames as fallback
+                import numpy as np
+                bgr_frames = []
+                for f in frames:
+                    if hasattr(f, "shape"):
+                        bgr_frames.append(f)
+                    else:
+                        import cv2
+                        bgr_frames.append(cv2.cvtColor(np.array(f), cv2.COLOR_RGB2BGR))
+                tensor = enc.encode(bgr_frames) if bgr_frames else enc.encode(None)
             del enc
             return tensor
         except Exception as exc:
