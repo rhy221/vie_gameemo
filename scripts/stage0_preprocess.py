@@ -33,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--videos-dir", type=Path, default=None, help="Input videos directory")
     parser.add_argument("--limit", type=int, default=None, help="Process only first N clips")
     parser.add_argument("--skip-webcam-detect", action="store_true", help="Skip webcam detection step")
+    parser.add_argument("--resume", action="store_true", help="Skip clips that already have audio + frames")
+    parser.add_argument("--overwrite", action="store_true", help="Re-process all clips even if output exists")
     return parser.parse_args()
 
 
@@ -53,9 +55,14 @@ def main() -> int:
         video_paths = video_paths[: args.limit]
     logger.info("Found %d videos to process", len(video_paths))
 
+    strategy = getattr(cfg.visual_encoder, "strategy", "dual_path")
+    skip_webcam = args.skip_webcam_detect or strategy == "full_frame"
+    if skip_webcam:
+        logger.info("Webcam detection skipped (strategy=%s, flag=%s)", strategy, args.skip_webcam_detect)
+
     detector = None
     bbox_map: dict[str, dict | None] = {}
-    if not args.skip_webcam_detect:
+    if not skip_webcam:
         detector = WebcamDetector(
             min_detection_confidence=cfg.visual_encoder.webcam_detector.min_detection_confidence,
             sample_n_frames=cfg.visual_encoder.webcam_detector.sample_n_frames,
@@ -65,20 +72,39 @@ def main() -> int:
             edge_bias=cfg.visual_encoder.webcam_detector.edge_bias,
         )
 
+    # Load existing webcam bboxes for resume mode
+    if not skip_webcam and args.resume and webcam_bbox_file.exists():
+        import json
+        bbox_map = json.loads(webcam_bbox_file.read_text(encoding="utf-8"))
+        logger.info("Resumed %d existing webcam bboxes", len(bbox_map))
+
+    n_skipped = 0
     for video_path in video_paths:
         clip_id = video_path.stem
+        audio_out = audio_dir / f"{clip_id}.wav"
+        clip_frames_dir = frames_dir / clip_id
+
+        # Resume: skip if audio + frames already exist
+        if args.resume and not args.overwrite:
+            has_audio = audio_out.exists()
+            has_frames = clip_frames_dir.exists() and any(clip_frames_dir.glob("frame_*.jpg"))
+            has_bbox = skip_webcam or clip_id in bbox_map
+            if has_audio and has_frames and has_bbox:
+                n_skipped += 1
+                continue
+
         logger.info("Processing %s", clip_id)
 
         # Audio
         extract_audio(
             video_path=video_path,
-            output_path=audio_dir / f"{clip_id}.wav",
+            output_path=audio_out,
             sample_rate=cfg.preprocess.audio.sample_rate,
             channels=cfg.preprocess.audio.channels,
         )
 
         # Frames
-        clip_frames_dir = ensure_dir(frames_dir / clip_id)
+        clip_frames_dir = ensure_dir(clip_frames_dir)
         extract_frames(
             video_path=video_path,
             output_dir=clip_frames_dir,
@@ -91,7 +117,10 @@ def main() -> int:
             bbox = detector.detect_webcam_region(video_path)
             bbox_map[clip_id] = bbox.__dict__ if bbox else None
 
-    if not args.skip_webcam_detect:
+    if n_skipped:
+        logger.info("Skipped %d already-processed clips (resume mode)", n_skipped)
+
+    if not skip_webcam:
         write_json(bbox_map, webcam_bbox_file)
         logger.info("Saved webcam bboxes for %d clips → %s", len(bbox_map), webcam_bbox_file)
 

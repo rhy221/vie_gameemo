@@ -45,10 +45,14 @@ def parse_args() -> argparse.Namespace:
         help="Experiment override file name (without .yaml) under configs/experiments/",
     )
     parser.add_argument(
-        "--stage", choices=["perception", "cognition"], required=True,
+        "--stage", choices=["perception", "llm_perception", "cognition"], required=True,
         help="Which curriculum stage to train",
     )
     parser.add_argument("--resume-from", type=Path, default=None, help="Checkpoint to resume from")
+    parser.add_argument(
+        "--llm-perception-ckpt", type=Path, default=None,
+        help="Stage 2a checkpoint (llm_perception_best.pt) to warm-start cognition from",
+    )
     parser.add_argument("--epochs", type=int, default=None, help="Override config epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Override config batch size")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
@@ -105,6 +109,16 @@ def main() -> int:
             cfg=cfg, train_loader=train_loader, val_loader=val_loader,
             device=device, resume_from=args.resume_from,
         )
+    elif args.stage == "llm_perception":
+        if not args.resume_from:
+            raise ValueError("--resume-from REQUIRED for llm_perception stage (perception checkpoint)")
+        from vie_gameemo.training.cognition import train_llm_perception
+        use_hint = cfg.llm.active_setup in ("llm2",)
+        ckpt = train_llm_perception(
+            cfg=cfg, perception_checkpoint=args.resume_from,
+            train_loader=train_loader, val_loader=val_loader,
+            device=device, use_mlp_hint=use_hint,
+        )
     else:
         if not args.resume_from:
             raise ValueError("--resume-from REQUIRED for cognition stage (perception checkpoint)")
@@ -112,6 +126,7 @@ def main() -> int:
             cfg=cfg, perception_checkpoint=args.resume_from,
             train_loader=train_loader, val_loader=val_loader,
             device=device,
+            llm_perception_checkpoint=args.llm_perception_ckpt,
         )
 
     logger.info("Training complete. Best checkpoint: %s", ckpt)

@@ -1,12 +1,15 @@
-"""Stage 2 — Cognition trainer (joint recognition + reasoning).
+"""LLM training stages.
 
-Loads the Stage 1 checkpoint (perception), FREEZES fusion + classifier,
-and trains an LLM (Qwen2.5-7B with LoRA) to generate reasoning explanations
-alongside classification.
+Two stages for LLM, run after MLP perception (Stage 1):
 
-Loss = α * L_classification + β * L_reasoning_LM
-    where L_reasoning_LM is the standard language modeling loss on the
-    multi-agent-generated reasoning text (cached during Stage 0).
+Stage 2a — LLM Perception (requires only GT labels):
+    Train ModalAdapter + LLM LoRA to predict emotion labels from soft tokens.
+    Input: [soft_token | instruction + label_choices] → target: <answer>{gt_label}</answer>
+    No annotated descriptions needed.
+
+Stage 2b — Cognition (optional, requires annotated descriptions):
+    Joint recognition + reasoning instruction tuning.
+    Loss = α * L_classification + β * L_reasoning_LM
 """
 
 import logging
@@ -20,15 +23,421 @@ from torch.utils.data import DataLoader
 logger = logging.getLogger(__name__)
 
 
+_LABEL_NAMES = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
+
+_LLM_PERCEPTION_PROMPT = (
+    "Dựa trên đặc trưng đa phương thức của clip game livestream, "
+    "hãy xác định cảm xúc của streamer.\n"
+    "Các nhãn có thể: {labels}\n"
+    "Trả lời theo format: <answer>[nhãn]</answer>"
+)
+
+_LLM_PERCEPTION_PROMPT_WITH_HINT = (
+    "Classifier gợi ý streamer đang ở trạng thái: {mlp_label}. "
+    "Đây chỉ là gợi ý — có thể đúng hoặc sai.\n"
+    "Dựa trên đặc trưng đa phương thức, hãy tự xác định cảm xúc.\n"
+    "Các nhãn có thể: {labels}\n"
+    "Trả lời theo format: <answer>[nhãn]</answer>"
+)
+
+
+def train_llm_perception(
+    cfg: SimpleNamespace,
+    perception_checkpoint: Path,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    device: torch.device,
+    use_mlp_hint: bool = False,
+) -> Path:
+    """Stage 2a — LLM Perception: align soft tokens to predict emotion labels.
+
+    Only requires ground-truth labels, no annotated descriptions.
+    Trains ModalAdapter + LLM LoRA to generate <answer>{label}</answer>
+    from fusion embedding soft tokens.
+
+    Args:
+        cfg: Full config namespace.
+        perception_checkpoint: Stage 1 checkpoint (fusion + classifier).
+        train_loader: DataLoader with cached features + labels.
+        val_loader: Validation DataLoader.
+        device: Torch device.
+        use_mlp_hint: If True, include MLP prediction as hint in prompt (LLM-2 style).
+
+    Returns:
+        Path to best checkpoint.
+    """
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from vie_gameemo.classifiers.mlp import EmotionClassifier
+    from vie_gameemo.fusion import get_fusion
+
+    lp_cfg = getattr(cfg.training, "llm_perception", None) or cfg.training.cognition
+    pcfg = cfg.training.perception
+    fcfg = cfg.fusion
+    ccfg = cfg.classifier
+    llm_cfg = cfg.llm
+
+    # Load fusion (init from MLP perception, fine-tune for LLM) + classifier (frozen)
+    fusion = get_fusion(
+        fcfg.type, d_model=fcfg.d_model, n_modalities=fcfg.n_modalities,
+        n_conv_blocks=getattr(fcfg, "n_conv_blocks", 4),
+        kernel_size=getattr(fcfg, "kernel_size", 3),
+        align_to=getattr(fcfg, "align_to", "audio"),
+        return_attention=False,
+    ).to(device)
+    classifier = EmotionClassifier(
+        d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
+        n_classes=ccfg.n_classes, dropout=ccfg.dropout,
+    ).to(device)
+
+    ckpt = torch.load(perception_checkpoint, map_location="cpu")
+    fusion.load_state_dict(ckpt["fusion_state_dict"])
+    classifier.load_state_dict(ckpt["classifier_state_dict"])
+
+    # Classifier always frozen — MLP prediction stays unchanged
+    for p in classifier.parameters():
+        p.requires_grad = False
+    classifier.eval()
+
+    # Fusion: fine-tune a separate copy for LLM (init from MLP perception weights)
+    # Original MLP fusion is preserved in perception_best.pt
+    fusion.train()
+    fusion_lr = getattr(lp_cfg.learning_rate, "fusion", 2e-5)
+    logger.info("Fusion: trainable for LLM (lr=%.1e), init from %s", fusion_lr, perception_checkpoint)
+
+    # Load LLM with LoRA
+    model_name = llm_cfg.base_model.name
+    logger.info("Loading LLM: %s", model_name)
+    quant_cfg = _make_bnb_config(llm_cfg.base_model.quantization)
+    lm_kwargs: dict = {"device_map": "auto"}
+    if quant_cfg is not None:
+        lm_kwargs["quantization_config"] = quant_cfg
+    else:
+        lm_kwargs["torch_dtype"] = torch.float16
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    llm = AutoModelForCausalLM.from_pretrained(model_name, **lm_kwargs)
+
+    lora_cfg_ns = lp_cfg.lora
+    if getattr(lora_cfg_ns, "enabled", True):
+        lora_config = LoraConfig(
+            r=lora_cfg_ns.rank, lora_alpha=lora_cfg_ns.alpha,
+            target_modules=list(lora_cfg_ns.target_modules),
+            bias="none", task_type="CAUSAL_LM",
+        )
+        llm = get_peft_model(llm, lora_config)
+        llm.print_trainable_parameters()
+
+    from vie_gameemo.llm.modal_adapter import ModalAdapter
+    llm_hidden_size = llm.config.hidden_size
+    llm_adapter = ModalAdapter(d_fusion=fcfg.d_model, d_llm=llm_hidden_size).to(device)
+
+    trainable_params = [
+        {"params": fusion.parameters(), "lr": fusion_lr},
+        {"params": llm_adapter.parameters()},
+        {"params": llm.parameters()},
+    ]
+    optimizer = torch.optim.AdamW(
+        trainable_params, lr=lp_cfg.learning_rate.llm,
+        weight_decay=getattr(pcfg, "weight_decay", 0.01),
+    )
+
+    n_epochs = lp_cfg.epochs
+    n_steps = len(train_loader) * n_epochs
+    warmup_steps = max(1, int(n_steps * getattr(pcfg, "warmup_ratio", 0.1)))
+
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return step / warmup_steps
+        progress = (step - warmup_steps) / max(1, n_steps - warmup_steps)
+        return 0.5 * (1 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    ckpt_dir = Path(cfg.paths.checkpoints)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    best_ckpt = ckpt_dir / "llm_perception_best.pt"
+
+    labels_str = ", ".join(_LABEL_NAMES)
+    mode_name = "LLM Perception (with MLP hint)" if use_mlp_hint else "LLM Perception"
+    logger.info("%s training: %d epochs", mode_name, n_epochs)
+    best_metric = float("-inf")
+    global_step = 0
+
+    for epoch in range(n_epochs):
+        fusion.train()
+        llm.train()
+        llm_adapter.train()
+        epoch_loss = 0.0
+        optimizer.zero_grad()
+
+        for step, batch in enumerate(train_loader):
+            audio = batch["audio"].to(device)
+            face = batch["face"].to(device)
+            context = batch["context"].to(device)
+            text_feat = batch["text"].to(device)
+            gt_labels = batch["label"].to(device)
+            has_face = batch.get("has_face")
+            if has_face is not None:
+                has_face = has_face.to(device)
+
+            B = audio.shape[0]
+
+            # Fusion is trainable — gradient flows back to fine-tune for LLM
+            fused = fusion(audio, face, context, text_feat, has_face=has_face)
+            if isinstance(fused, tuple):
+                fused = fused[0]
+
+            soft_tokens = llm_adapter(fused).mean(dim=1, keepdim=True)  # (B, 1, H)
+
+            # Build per-sample prompts + targets
+            prompts = []
+            targets = []
+            for i in range(B):
+                gt_name = _LABEL_NAMES[gt_labels[i].item()]
+                if use_mlp_hint:
+                    with torch.no_grad():
+                        mlp_logits = classifier(fused[i:i+1])
+                        mlp_idx = int(mlp_logits.argmax(dim=-1).item())
+                    mlp_name = _LABEL_NAMES[mlp_idx]
+                    prompt = _LLM_PERCEPTION_PROMPT_WITH_HINT.format(
+                        mlp_label=mlp_name, labels=labels_str,
+                    )
+                else:
+                    prompt = _LLM_PERCEPTION_PROMPT.format(labels=labels_str)
+
+                target = f"<think>\n</think>\n<answer>{gt_name}</answer>"
+                prompts.append(prompt)
+                targets.append(target)
+
+            # Tokenize prompt + target together for causal LM loss
+            full_texts = [p + "\n" + t for p, t in zip(prompts, targets)]
+            prompt_only = tokenizer(
+                prompts, return_tensors="pt", padding=True, truncation=True, max_length=256,
+            ).to(device)
+            full = tokenizer(
+                full_texts, return_tensors="pt", padding=True, truncation=True, max_length=300,
+            ).to(device)
+
+            embed_fn = llm.get_input_embeddings()
+            full_embeds = embed_fn(full["input_ids"])  # (B, L, H)
+
+            # Prepend soft token
+            inputs_embeds = torch.cat([soft_tokens, full_embeds], dim=1)  # (B, 1+L, H)
+            attn_mask = torch.cat([
+                torch.ones(B, 1, device=device, dtype=torch.long),
+                full["attention_mask"],
+            ], dim=1)
+
+            # Labels: mask soft token + prompt tokens, only compute loss on target tokens
+            lm_labels = full["input_ids"].clone()
+            for i in range(B):
+                prompt_len = prompt_only["attention_mask"][i].sum().item()
+                lm_labels[i, :prompt_len] = -100
+            lm_labels = torch.cat([
+                torch.full((B, 1), -100, device=device, dtype=torch.long),
+                lm_labels,
+            ], dim=1)
+
+            lm_out = llm(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attn_mask,
+                labels=lm_labels,
+            )
+
+            loss = lm_out.loss
+            loss.backward()
+            epoch_loss += loss.item()
+
+            grad_accum = getattr(lp_cfg, "gradient_accumulation", 1)
+            if (step + 1) % grad_accum == 0:
+                torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
+            global_step += 1
+
+        avg_loss = epoch_loss / max(1, len(train_loader))
+
+        llm_metrics = _eval_llm_metrics(
+            fusion, llm_adapter, llm, tokenizer, val_loader,
+            device, use_mlp_hint, classifier, n_samples=50,
+        )
+
+        logger.info(
+            "Epoch %d/%d | loss=%.4f | llm_macro_f1=%.4f | llm_uar=%.4f | format=%.2f",
+            epoch + 1, n_epochs, avg_loss,
+            llm_metrics["macro_f1"], llm_metrics["uar"], llm_metrics["format_rate"],
+        )
+        if llm_metrics["per_class_f1"]:
+            for cls_name, f1_val in llm_metrics["per_class_f1"].items():
+                logger.info("  %s: F1=%.4f recall=%.4f prec=%.4f",
+                            cls_name, f1_val,
+                            llm_metrics["per_class_recall"].get(cls_name, 0),
+                            llm_metrics["per_class_precision"].get(cls_name, 0))
+
+        llm_f1 = llm_metrics["macro_f1"]
+        if llm_f1 > best_metric:
+            best_metric = llm_f1
+            torch.save({
+                "fusion_state_dict": fusion.state_dict(),
+                "llm_adapter": llm_adapter.state_dict(),
+                "llm_peft": llm.state_dict() if hasattr(llm, "peft_config") else None,
+                "epoch": epoch,
+                "best_metric": best_metric,
+                "llm_metrics": llm_metrics,
+                "use_mlp_hint": use_mlp_hint,
+            }, best_ckpt)
+            logger.info("New best LLM perception model saved (macro_f1=%.4f)", llm_f1)
+
+    logger.info("%s training done. Best llm_macro_f1=%.4f", mode_name, best_metric)
+    return best_ckpt
+
+
+def _eval_llm_metrics(
+    fusion, llm_adapter, llm, tokenizer, val_loader,
+    device, use_mlp_hint, classifier, n_samples=50,
+) -> dict:
+    """Evaluate LLM's own label predictions on val set.
+
+    Returns accuracy, macro_f1, per-class f1, and format compliance.
+    """
+    import re
+    from collections import Counter
+
+    fusion.eval()
+    llm.eval()
+    llm_adapter.eval()
+
+    labels_str = ", ".join(_LABEL_NAMES)
+    gt_list = []
+    pred_list = []
+    n_valid_format = 0
+    total = 0
+
+    for batch in val_loader:
+        if total >= n_samples:
+            break
+
+        audio = batch["audio"].to(device)
+        face = batch["face"].to(device)
+        context = batch["context"].to(device)
+        text_feat = batch["text"].to(device)
+        gt_labels = batch["label"].to(device)
+        has_face = batch.get("has_face")
+        if has_face is not None:
+            has_face = has_face.to(device)
+
+        B = audio.shape[0]
+
+        with torch.no_grad():
+            fused = fusion(audio, face, context, text_feat, has_face=has_face)
+            if isinstance(fused, tuple):
+                fused = fused[0]
+            soft_tokens = llm_adapter(fused).mean(dim=1, keepdim=True)
+
+            for i in range(min(B, n_samples - total)):
+                gt_idx = gt_labels[i].item()
+                gt_name = _LABEL_NAMES[gt_idx]
+
+                if use_mlp_hint:
+                    mlp_logits = classifier(fused[i:i+1])
+                    mlp_name = _LABEL_NAMES[int(mlp_logits.argmax(dim=-1).item())]
+                    prompt = _LLM_PERCEPTION_PROMPT_WITH_HINT.format(
+                        mlp_label=mlp_name, labels=labels_str,
+                    )
+                else:
+                    prompt = _LLM_PERCEPTION_PROMPT.format(labels=labels_str)
+
+                text_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+                text_embeds = llm.get_input_embeddings()(text_ids)
+                inputs_embeds = torch.cat([soft_tokens[i:i+1], text_embeds], dim=1)
+
+                out_ids = llm.generate(
+                    inputs_embeds=inputs_embeds,
+                    max_new_tokens=30,
+                    do_sample=False,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+                raw = tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
+
+                match = re.search(r"<answer>(.*?)</answer>", raw, re.DOTALL)
+                if match:
+                    n_valid_format += 1
+                    predicted = match.group(1).strip().lower()
+                else:
+                    predicted = ""
+
+                pred_idx = _LABEL_NAMES.index(predicted) if predicted in _LABEL_NAMES else -1
+                gt_list.append(gt_idx)
+                pred_list.append(pred_idx)
+                total += 1
+
+    fusion.train()
+    llm.train()
+    llm_adapter.train()
+
+    from sklearn.metrics import (
+        accuracy_score, f1_score, recall_score, precision_score,
+    )
+
+    # Map invalid predictions to -1 for sklearn
+    valid_mask = [p >= 0 for p in pred_list]
+    gt_arr = [gt_list[i] for i in range(len(gt_list)) if valid_mask[i]]
+    pred_arr = [pred_list[i] for i in range(len(pred_list)) if valid_mask[i]]
+
+    if not gt_arr:
+        return {
+            "accuracy": 0.0, "macro_f1": 0.0, "weighted_f1": 0.0,
+            "uar": 0.0, "format_rate": 0.0, "n_samples": total,
+            "per_class_f1": {}, "per_class_recall": {}, "per_class_precision": {},
+        }
+
+    accuracy = accuracy_score(gt_arr, pred_arr)
+    macro_f1 = f1_score(gt_arr, pred_arr, average="macro", zero_division=0)
+    weighted_f1 = f1_score(gt_arr, pred_arr, average="weighted", zero_division=0)
+    uar = recall_score(gt_arr, pred_arr, average="macro", zero_division=0)
+    format_rate = n_valid_format / max(1, total)
+
+    # Per-class metrics
+    n_classes = len(_LABEL_NAMES)
+    per_f1 = f1_score(gt_arr, pred_arr, average=None, labels=range(n_classes), zero_division=0)
+    per_recall = recall_score(gt_arr, pred_arr, average=None, labels=range(n_classes), zero_division=0)
+    per_precision = precision_score(gt_arr, pred_arr, average=None, labels=range(n_classes), zero_division=0)
+
+    gt_classes = set(gt_arr)
+    per_class_f1 = {_LABEL_NAMES[c]: float(per_f1[c]) for c in gt_classes}
+    per_class_recall = {_LABEL_NAMES[c]: float(per_recall[c]) for c in gt_classes}
+    per_class_precision = {_LABEL_NAMES[c]: float(per_precision[c]) for c in gt_classes}
+
+    return {
+        "accuracy": float(accuracy),
+        "macro_f1": float(macro_f1),
+        "weighted_f1": float(weighted_f1),
+        "uar": float(uar),
+        "format_rate": float(format_rate),
+        "n_samples": total,
+        "per_class_f1": per_class_f1,
+        "per_class_recall": per_class_recall,
+        "per_class_precision": per_class_precision,
+    }
+
+
 def train_cognition(
     cfg: SimpleNamespace,
     perception_checkpoint: Path,
     train_loader: DataLoader,
     val_loader: DataLoader,
     device: torch.device,
-    resume_from: Path | None = None,
+    llm_perception_checkpoint: Path | None = None,
 ) -> Path:
-    """Train Stage 2 — Cognition (joint cls + reasoning).
+    """Train Stage 2b — Cognition (joint cls + reasoning).
+
+    Continues from Stage 2a (LLM Perception) if checkpoint provided,
+    otherwise starts fresh from Stage 1 (MLP Perception).
 
     Args:
         cfg: Full config namespace.
@@ -36,7 +445,8 @@ def train_cognition(
         train_loader: DataLoader with batches including reasoning targets.
         val_loader: Validation DataLoader.
         device: Torch device.
-        resume_from: Optional cognition checkpoint to resume from.
+        llm_perception_checkpoint: Optional Stage 2a checkpoint to continue
+            from (loads fusion_v2 + ModalAdapter + LLM LoRA).
 
     Returns:
         Path to best checkpoint.
@@ -47,7 +457,6 @@ def train_cognition(
     from vie_gameemo.classifiers.mlp import EmotionClassifier
     from vie_gameemo.fusion import get_fusion
     from vie_gameemo.training.losses import FocalLoss
-    from vie_gameemo.training.perception import TrainingState, evaluate, _save_checkpoint
 
     ccfg_train = cfg.training.cognition
     pcfg = cfg.training.perception
@@ -55,7 +464,11 @@ def train_cognition(
     ccfg = cfg.classifier
     llm_cfg = cfg.llm
 
-    # Build and load frozen fusion + classifier from Stage 1
+    # Determine which checkpoint to load fusion from:
+    # - If Stage 2a checkpoint exists, use fusion_v2 (optimized for LLM)
+    # - Otherwise fall back to fusion_v1 from Stage 1
+    fusion_source = llm_perception_checkpoint or perception_checkpoint
+
     fusion = get_fusion(
         fcfg.type,
         d_model=fcfg.d_model,
@@ -72,14 +485,19 @@ def train_cognition(
         dropout=ccfg.dropout,
     ).to(device)
 
-    ckpt = torch.load(perception_checkpoint, map_location="cpu")
-    fusion.load_state_dict(ckpt["fusion_state_dict"])
-    classifier.load_state_dict(ckpt["classifier_state_dict"])
+    fusion_ckpt = torch.load(fusion_source, map_location="cpu")
+    fusion.load_state_dict(fusion_ckpt["fusion_state_dict"])
+    logger.info("Loaded fusion from %s", fusion_source)
 
-    # Freeze fusion + classifier
+    # Classifier always from Stage 1 perception
+    cls_ckpt = torch.load(perception_checkpoint, map_location="cpu")
+    classifier.load_state_dict(cls_ckpt["classifier_state_dict"])
+
+    # Freeze fusion + classifier (frozen in cognition per skeleton spec)
     for p in list(fusion.parameters()) + list(classifier.parameters()):
         p.requires_grad = False
-    logger.info("Loaded and froze perception checkpoint from %s", perception_checkpoint)
+    fusion.eval()
+    classifier.eval()
 
     # Load LLM with LoRA
     model_name = llm_cfg.base_model.name
@@ -92,6 +510,8 @@ def train_cognition(
         lm_kwargs["torch_dtype"] = torch.float16
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     llm = AutoModelForCausalLM.from_pretrained(model_name, **lm_kwargs)
 
     lora_cfg_ns = ccfg_train.lora
@@ -106,10 +526,21 @@ def train_cognition(
         llm = get_peft_model(llm, lora_config)
         llm.print_trainable_parameters()
 
-    # Modal adapter: project fusion dim → LLM embedding space (Emotion-LLaMAv2 pattern)
     from vie_gameemo.llm.modal_adapter import ModalAdapter
     llm_hidden_size = llm.config.hidden_size
     llm_adapter = ModalAdapter(d_fusion=fcfg.d_model, d_llm=llm_hidden_size).to(device)
+
+    # If Stage 2a checkpoint exists, warm-start adapter + LoRA from it
+    if llm_perception_checkpoint and Path(llm_perception_checkpoint).exists():
+        lp_ckpt = torch.load(llm_perception_checkpoint, map_location="cpu")
+        if "llm_adapter" in lp_ckpt:
+            llm_adapter.load_state_dict(lp_ckpt["llm_adapter"])
+            logger.info("Loaded ModalAdapter from Stage 2a: %s", llm_perception_checkpoint)
+        if "llm_peft" in lp_ckpt and lp_ckpt["llm_peft"] is not None:
+            llm.load_state_dict(lp_ckpt["llm_peft"], strict=False)
+            logger.info("Loaded LLM LoRA from Stage 2a: %s", llm_perception_checkpoint)
+    else:
+        logger.info("No Stage 2a checkpoint — starting ModalAdapter + LoRA from scratch")
 
     cls_criterion = FocalLoss(gamma=ccfg.loss.focal.gamma)
 
@@ -155,7 +586,7 @@ def train_cognition(
             face = batch["face"].to(device)
             context = batch["context"].to(device)
             text = batch["text"].to(device)
-            labels = batch["label"].to(device)
+            gt_labels = batch["label"].to(device)
             has_face = batch.get("has_face")
             if has_face is not None:
                 has_face = has_face.to(device)
@@ -166,14 +597,13 @@ def train_cognition(
                     fused = fused[0]
                 cls_logits = classifier(fused)
 
-            cls_loss = cls_criterion(cls_logits, labels)
+            cls_loss = cls_criterion(cls_logits, gt_labels)
 
             # Language modeling loss: soft token (from modal adapter) + reasoning text
             lm_loss = torch.tensor(0.0, device=device)
             reasoning_texts = batch.get("reasoning_text")
             if reasoning_texts:
                 B = fused.shape[0]
-                # Pool fused sequence → 1 soft token per sample, project to LLM dim
                 soft_token = llm_adapter(fused).mean(dim=1, keepdim=True)  # (B, 1, H)
 
                 inputs = tokenizer(
@@ -185,16 +615,14 @@ def train_cognition(
                 ).to(device)
 
                 embed_fn = llm.get_input_embeddings()
-                text_embeds = embed_fn(inputs["input_ids"])          # (B, L, H)
+                text_embeds = embed_fn(inputs["input_ids"])
 
-                # Inject soft token before text: [soft_token | text_tokens]
-                inputs_embeds = torch.cat([soft_token, text_embeds], dim=1)  # (B, 1+L, H)
+                inputs_embeds = torch.cat([soft_token, text_embeds], dim=1)
                 attn_mask = torch.cat([
                     torch.ones(B, 1, device=device, dtype=torch.long),
                     inputs["attention_mask"],
                 ], dim=1)
-                # Mask soft token from language modeling loss (-100 = ignore)
-                labels = torch.cat([
+                lm_labels = torch.cat([
                     torch.full((B, 1), -100, device=device, dtype=torch.long),
                     inputs["input_ids"],
                 ], dim=1)
@@ -202,7 +630,7 @@ def train_cognition(
                 lm_out = llm(
                     inputs_embeds=inputs_embeds,
                     attention_mask=attn_mask,
-                    labels=labels,
+                    labels=lm_labels,
                 )
                 lm_loss = lm_out.loss
 
@@ -218,23 +646,34 @@ def train_cognition(
                 scheduler.step()
 
         avg_loss = epoch_loss / max(1, len(train_loader))
-        val_metrics = evaluate(fusion=fusion, classifier=classifier,
-                               loader=val_loader, device=device, n_classes=ccfg.n_classes)
-        macro_f1 = val_metrics["macro_f1"]
-        logger.info("Epoch %d/%d | loss=%.4f | val_macro_f1=%.4f",
-                    epoch + 1, ccfg_train.epochs, avg_loss, macro_f1)
 
-        if macro_f1 > best_metric:
-            best_metric = macro_f1
+        # Evaluate LLM's own predictions (label accuracy + format compliance)
+        llm_metrics = _eval_llm_metrics(
+            fusion, llm_adapter, llm, tokenizer, val_loader,
+            device, use_mlp_hint=False, classifier=classifier, n_samples=50,
+        )
+        llm_f1 = llm_metrics["macro_f1"]
+        logger.info(
+            "Epoch %d/%d | loss=%.4f | llm_macro_f1=%.4f | llm_uar=%.4f | format=%.2f",
+            epoch + 1, ccfg_train.epochs, avg_loss,
+            llm_f1, llm_metrics["uar"], llm_metrics["format_rate"],
+        )
+        if llm_metrics["per_class_f1"]:
+            for cls_name, f1_val in llm_metrics["per_class_f1"].items():
+                logger.info("  %s: F1=%.4f", cls_name, f1_val)
+
+        if llm_f1 > best_metric:
+            best_metric = llm_f1
             torch.save({
                 "llm_adapter": llm_adapter.state_dict(),
                 "llm_peft": llm.state_dict() if hasattr(llm, "peft_config") else None,
                 "epoch": epoch,
                 "best_metric": best_metric,
+                "llm_metrics": llm_metrics,
             }, best_ckpt)
-            logger.info("New best cognition model saved (macro_f1=%.4f)", macro_f1)
+            logger.info("New best cognition model saved (llm_macro_f1=%.4f)", llm_f1)
 
-    logger.info("Cognition training done. Best macro_f1=%.4f", best_metric)
+    logger.info("Cognition training done. Best llm_macro_f1=%.4f", best_metric)
     return best_ckpt
 
 
