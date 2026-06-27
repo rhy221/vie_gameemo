@@ -215,22 +215,24 @@ def main() -> int:
                 full_crops = [c for c in full_crops if c is not None]
                 feat, _ = encoders["face"].encode(full_crops if full_crops else None)
                 features["face"] = feat.squeeze(0)
+            elif has_face and resolved_bbox is not None and frame_paths:
+                # Strategy B/C: crop face on-the-fly từ bbox + frames
+                from vie_gameemo.preprocess.face_crop import extract_streamer_face
+                margin = getattr(cfg.visual_encoder.face_encoder, "crop_margin", 0.2)
+                crops = []
+                for fp in frame_paths:
+                    frame = cv2.imread(str(fp))
+                    if frame is not None:
+                        crops.append(extract_streamer_face(frame, resolved_bbox, margin=margin))
+                feat, _ = encoders["face"].encode(crops if crops else None)
+                features["face"] = feat.squeeze(0)
             else:
-                # Strategy B/C: webcam face crops, fallback full-frame
-                face_dir = Path(cfg.paths.faces) / clip_id
-                if has_face and face_dir.exists():
-                    face_files = sorted(face_dir.glob("*.jpg"))
-                    crops = [cv2.imread(str(fp)) for fp in face_files]
-                    crops = [c for c in crops if c is not None]
-                    feat, _ = encoders["face"].encode(crops if crops else None)
-                    features["face"] = feat.squeeze(0)
-                else:
-                    # Fallback: full-frame khi không detect được webcam
-                    logger.warning("Webcam not detected for %s — face encoder fallback to full frames", clip_id)
-                    full_crops = [cv2.imread(str(fp)) for fp in frame_paths]
-                    full_crops = [c for c in full_crops if c is not None]
-                    feat, _ = encoders["face"].encode(full_crops if full_crops else None)
-                    features["face"] = feat.squeeze(0)
+                # No webcam → full-frame fallback (ViT-FER tự xử lý)
+                logger.info("No webcam for %s — face encoder uses full frames", clip_id)
+                full_crops = [cv2.imread(str(fp)) for fp in frame_paths]
+                full_crops = [c for c in full_crops if c is not None]
+                feat, _ = encoders["face"].encode(full_crops if full_crops else None)
+                features["face"] = feat.squeeze(0)
 
         if "context" in encoders:
             if strategy == "face_only":
