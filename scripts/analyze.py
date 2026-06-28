@@ -84,7 +84,14 @@ def main() -> int:
         report["top_confusions"] = confusion
         _print_confusions(confusion)
 
-    # 3. Per-language analysis
+    # 3. Misclassified clips
+    predictions = eval_data.get("predictions", [])
+    if predictions:
+        misclassified = _misclassification_analysis(predictions, ann_map)
+        report["misclassified"] = misclassified
+        _print_misclassified(misclassified)
+
+    # 4. Per-language analysis
     lang_report = _per_language_analysis(eval_data, ann_map)
     if lang_report:
         report["per_language"] = lang_report
@@ -143,6 +150,60 @@ def _per_class_breakdown(metrics: dict) -> list[dict]:
         })
     rows.sort(key=lambda r: r["f1"])
     return rows
+
+
+# ---------------------------------------------------------------------------
+# 3. Misclassification analysis
+# ---------------------------------------------------------------------------
+
+def _misclassification_analysis(predictions: list[dict], ann_map: dict) -> dict:
+    errors = [p for p in predictions if not p["correct"]]
+    by_pair: dict[str, list[dict]] = {}
+    for e in errors:
+        key = f"{e['gt']} → {e['pred']}"
+        by_pair.setdefault(key, []).append(e)
+
+    error_details = []
+    for e in errors:
+        clip_id = e["clip_id"]
+        ann = ann_map.get(clip_id, {})
+        error_details.append({
+            "clip_id": clip_id,
+            "gt": e["gt"],
+            "pred": e["pred"],
+            "transcript": ann.get("transcript", "")[:100],
+            "source_language": ann.get("source_language", "vi"),
+        })
+
+    top_pairs = sorted(by_pair.items(), key=lambda x: len(x[1]), reverse=True)
+
+    return {
+        "total_errors": len(errors),
+        "total_samples": len(predictions),
+        "error_rate": len(errors) / max(1, len(predictions)),
+        "by_pair": {k: len(v) for k, v in top_pairs},
+        "details": error_details,
+    }
+
+
+def _print_misclassified(mis: dict) -> None:
+    logger.info("")
+    logger.info("=" * 65)
+    logger.info("MISCLASSIFIED CLIPS (%d/%d, error rate %.1f%%)",
+                mis["total_errors"], mis["total_samples"], mis["error_rate"] * 100)
+    logger.info("=" * 65)
+
+    logger.info("")
+    logger.info("  Error count by pair:")
+    for pair, count in mis["by_pair"].items():
+        logger.info(f"    {pair:<30} : {count}")
+
+    logger.info("")
+    logger.info("  Details (all errors):")
+    logger.info(f"    {'clip_id':<28} {'GT':<12} {'Pred':<12} {'Lang':>4}  Transcript")
+    logger.info(f"    {'-'*28} {'-'*12} {'-'*12} {'-'*4}  {'-'*30}")
+    for d in mis["details"]:
+        logger.info(f"    {d['clip_id']:<28} {d['gt']:<12} {d['pred']:<12} {d['source_language']:>4}  {d['transcript'][:50]}")
 
 
 def _print_per_class(rows: list[dict]) -> None:
