@@ -264,6 +264,13 @@ def main() -> int:
 
         features["has_face"] = torch.tensor([has_face], dtype=torch.bool)
 
+        # Merge with existing cache if only extracting a subset of modalities
+        pt_path = features_dir / f"{clip_id}.pt"
+        if pt_path.exists() and set(args.modalities) != {"audio", "face", "context", "text"}:
+            existing = torch.load(pt_path, map_location="cpu", weights_only=False)
+            existing.update(features)
+            features = existing
+
         cache_features(clip_id, features, features_dir, overwrite=True,
                        config_hash=cfg_hash)
         n_done += 1

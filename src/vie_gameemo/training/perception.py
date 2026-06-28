@@ -182,6 +182,7 @@ def train_perception(
         val_metrics = evaluate(
             fusion=fusion, classifier=classifier, loader=val_loader,
             device=device, n_classes=ccfg.n_classes,
+            return_predictions=True,
         )
         macro_f1 = val_metrics["macro_f1"]
         logger.info(
@@ -198,6 +199,18 @@ def train_perception(
             state.patience_counter = 0
             _save_checkpoint(best_ckpt, fusion, classifier, optimizer, state)
             logger.info("New best model saved (macro_f1=%.4f)", macro_f1)
+
+            # Save misclassified clips for dataset review
+            predictions = val_metrics.get("predictions", [])
+            errors = [p for p in predictions if not p["correct"]]
+            if errors:
+                import json
+                errors_path = ckpt_dir / "misclassified_best_epoch.json"
+                errors_path.write_text(
+                    json.dumps(errors, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                logger.info("Saved %d misclassified clips → %s", len(errors), errors_path)
         else:
             state.patience_counter += 1
             if state.patience_counter >= patience:
@@ -214,7 +227,8 @@ def evaluate(
     loader: DataLoader,
     device: torch.device,
     n_classes: int,
-) -> dict[str, float]:
+    return_predictions: bool = False,
+) -> dict:
     """Evaluate fusion+classifier on a loader.
 
     Args:
@@ -223,14 +237,17 @@ def evaluate(
         loader: DataLoader.
         device: Torch device.
         n_classes: Number of emotion classes.
+        return_predictions: If True, include per-sample predictions in output.
 
     Returns:
         Dict with keys: 'accuracy', 'macro_f1', 'weighted_f1', 'uar'.
+        If return_predictions: also 'predictions' list of {clip_id, gt, pred, correct}.
     """
     fusion.eval()
     classifier.eval()
     all_preds: list[int] = []
     all_labels: list[int] = []
+    all_clip_ids: list[str] = []
 
     with torch.no_grad():
         for batch in loader:
@@ -251,6 +268,11 @@ def evaluate(
 
             all_preds.extend(preds.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
+            clip_ids = batch.get("clip_id", [""] * len(labels))
+            if isinstance(clip_ids, (list, tuple)):
+                all_clip_ids.extend(clip_ids)
+            else:
+                all_clip_ids.extend([""] * len(labels))
 
     from vie_gameemo.training.losses import per_class_metrics as compute_per_class
     from vie_gameemo.data.schemas import EmotionLabel
@@ -265,7 +287,7 @@ def evaluate(
     class_names = [e.value for e in EmotionLabel]
     detailed = compute_per_class(all_preds, all_labels, n_classes, class_names)
 
-    return {
+    result = {
         "accuracy": float(accuracy),
         "macro_f1": float(macro_f1),
         "weighted_f1": float(weighted_f1),
@@ -275,6 +297,21 @@ def evaluate(
         "per_class_precision": detailed["per_class_precision"],
         "confusion_matrix": detailed["confusion_matrix"],
     }
+
+    if return_predictions:
+        predictions = []
+        for i, (pred, label) in enumerate(zip(all_preds, all_labels)):
+            gt_name = class_names[label] if label < len(class_names) else str(label)
+            pred_name = class_names[pred] if pred < len(class_names) else str(pred)
+            predictions.append({
+                "clip_id": all_clip_ids[i] if i < len(all_clip_ids) else "",
+                "gt": gt_name,
+                "pred": pred_name,
+                "correct": pred == label,
+            })
+        result["predictions"] = predictions
+
+    return result
 
 
 def _save_checkpoint(
