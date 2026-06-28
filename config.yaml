@@ -271,8 +271,8 @@ visual_encoder:
 
   # Webcam region detection (separates streamer face from in-game NPC faces)
   webcam_detector:
-    backend: "mediapipe"
-    min_detection_confidence: 0.4
+    backend: "owlv2"             # "mediapipe" | "owlv2" | "yolo"
+    min_detection_confidence: 0.1
     sample_n_frames: 30          # frames sampled to find stable region
     clustering:
       method: "dbscan"
@@ -281,6 +281,16 @@ visual_encoder:
     stability_threshold: 0.3     # cluster_size / sample_n (lowered for small webcams)
     edge_bias: 0.3               # webcam usually within 0.3 of edges
     fallback: "full_frame"       # full_frame = context encoder uses full frames when no webcam
+
+    # OWLv2 settings (zero-shot, no training needed)
+    owlv2:
+      model: "google/owlv2-base-patch16-finetuned"
+      prompt: "facecam overlay"
+
+    # YOLO settings (requires trained weights or COCO pretrained)
+    yolo:
+      model: "yolo11n.pt"        # path to weights or ultralytics model ID
+      classes: [0]               # 0=person in COCO; change if custom-trained
 
   # Path 1: face encoder (streamer face only)
   face_encoder:

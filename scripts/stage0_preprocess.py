@@ -63,14 +63,24 @@ def main() -> int:
     detector = None
     bbox_map: dict[str, dict | None] = {}
     if not skip_webcam:
+        wc = cfg.visual_encoder.webcam_detector
+        backend = getattr(wc, "backend", "mediapipe")
+        owlv2_cfg = getattr(wc, "owlv2", None)
+        yolo_cfg = getattr(wc, "yolo", None)
         detector = WebcamDetector(
-            min_detection_confidence=cfg.visual_encoder.webcam_detector.min_detection_confidence,
-            sample_n_frames=cfg.visual_encoder.webcam_detector.sample_n_frames,
-            dbscan_eps=cfg.visual_encoder.webcam_detector.clustering.eps,
-            dbscan_min_samples=cfg.visual_encoder.webcam_detector.clustering.min_samples,
-            stability_threshold=cfg.visual_encoder.webcam_detector.stability_threshold,
-            edge_bias=cfg.visual_encoder.webcam_detector.edge_bias,
+            backend=backend,
+            min_detection_confidence=wc.min_detection_confidence,
+            sample_n_frames=wc.sample_n_frames,
+            dbscan_eps=wc.clustering.eps,
+            dbscan_min_samples=wc.clustering.min_samples,
+            stability_threshold=wc.stability_threshold,
+            edge_bias=wc.edge_bias,
+            owlv2_model=getattr(owlv2_cfg, "model", "google/owlv2-base-patch16-finetuned") if owlv2_cfg else "google/owlv2-base-patch16-finetuned",
+            owlv2_prompt=getattr(owlv2_cfg, "prompt", "facecam overlay") if owlv2_cfg else "facecam overlay",
+            yolo_model=getattr(yolo_cfg, "model", "yolo11n.pt") if yolo_cfg else "yolo11n.pt",
+            yolo_classes=list(getattr(yolo_cfg, "classes", [0])) if yolo_cfg else [0],
         )
+        logger.info("Webcam detector backend: %s", backend)
 
     # Load existing webcam bboxes for resume mode
     if not skip_webcam and args.resume and webcam_bbox_file.exists():
