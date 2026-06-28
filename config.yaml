@@ -252,16 +252,10 @@ labeling:
 # STAGE 2a: Audio Encoder
 # -----------------------------------------------------------------------------
 audio_encoder:
-  type: "ast"   # "ast" | "wav2vec2" | "hubert" (for ablation)
-  model_name: "MIT/ast-finetuned-audioset-10-10-0.4593"
+  type: "whisper"   # "whisper" | "ast" | "wav2vec2" | "hubert" (for ablation)
+  model_name: "openai/whisper-small"   # 768d, matches fusion d_model
   target_tokens: 64        # adaptive pool to this length
-  spectrogram:
-    n_mels: 128
-    win_length_ms: 25
-    hop_length_ms: 10
-    fmin: 20
-    fmax: 8000
-    normalize: "per_clip_zscore"
+  d_out: 768               # output dim (projection if model hidden != 768)
 
 # -----------------------------------------------------------------------------
 # STAGE 2b: Visual Dual-Path Encoder (Section 5 of spec — DOMAIN ADAPTED)

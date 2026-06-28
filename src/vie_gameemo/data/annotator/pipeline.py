@@ -263,8 +263,12 @@ def _process_single_clip_local(
     webcam_bbox = None
     try:
         detector = WebcamDetector(
-            min_detection_confidence=0.7,
+            backend="owlv2",
+            min_detection_confidence=0.1,
             sample_n_frames=30,
+            stability_threshold=0.3,
+            dbscan_eps=0.08,
+            dbscan_min_samples=3,
         )
         raw_bbox = detector.detect_webcam_region(clip_path)
         if raw_bbox is not None:

@@ -161,7 +161,14 @@ class LLM1Explainer(BaseLLMReasoner):
         """Generate conditioned on soft token + text prompt with label."""
         fusion_emb = fusion_emb.to(self.model.device)
         with torch.no_grad():
-            soft_token = self.modal_adapter(fusion_emb).mean(dim=1, keepdim=True)
+            soft_tokens, soft_mask = self.modal_adapter(
+                fusion_emb,
+                audio=evidence.get("audio_emb"),
+                face=evidence.get("face_emb"),
+                context=evidence.get("context_emb"),
+                text=evidence.get("text_emb"),
+                has_face=evidence.get("has_face"),
+            )
 
             prompt = self.prompt_template.format(
                 label=label,
@@ -171,7 +178,7 @@ class LLM1Explainer(BaseLLMReasoner):
             text_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.model.device)
             text_embeds = self.model.get_input_embeddings()(text_ids)
 
-            inputs_embeds = torch.cat([soft_token, text_embeds], dim=1)
+            inputs_embeds = torch.cat([soft_tokens, text_embeds], dim=1)
 
             out_ids = self.model.generate(
                 inputs_embeds=inputs_embeds,

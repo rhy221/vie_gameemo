@@ -44,12 +44,12 @@ class WebcamDetector:
 
     def __init__(
         self,
-        backend: str = "mediapipe",
-        min_detection_confidence: float = 0.4,
+        backend: str = "owlv2",
+        min_detection_confidence: float = 0.1,
         sample_n_frames: int = 30,
-        dbscan_eps: float = 0.05,
-        dbscan_min_samples: int = 5,
-        stability_threshold: float = 0.5,
+        dbscan_eps: float = 0.08,
+        dbscan_min_samples: int = 3,
+        stability_threshold: float = 0.3,
         edge_bias: float = 0.3,
         owlv2_model: str = "google/owlv2-base-patch16-finetuned",
         owlv2_prompt: str = "facecam overlay",
@@ -220,6 +220,17 @@ class WebcamDetector:
         if not cluster_candidates:
             cluster_candidates = list(detections)
 
+        if len(cluster_candidates) < self.dbscan_min_samples:
+            if len(cluster_candidates) >= 2:
+                best = max(cluster_candidates, key=lambda d: d[2] * d[3])
+                cx = best[0] + best[2] / 2
+                cy = best[1] + best[3] / 2
+                edge_dist = float(min(cx, cy, 1.0 - cx, 1.0 - cy))
+                if edge_dist < self.edge_bias:
+                    logger.info("Few detections (%d) but edge-biased — accepting as webcam", len(cluster_candidates))
+                    return self._build_bbox_from_detections(cluster_candidates, n_sampled)
+            return None
+
         centers = np.array([(x + w / 2, y + h / 2) for x, y, w, h in cluster_candidates])
         labels = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit_predict(centers)
 
@@ -241,15 +252,23 @@ class WebcamDetector:
                 best_cluster = label
 
         if best_cluster is None:
+            logger.debug("No cluster passed stability threshold (%.2f)", self.stability_threshold)
             return None
 
         mask = labels == best_cluster
         cluster_dets = [cluster_candidates[i] for i, m in enumerate(mask) if m]
+        return self._build_bbox_from_detections(cluster_dets, n_sampled)
 
-        face_xmin = float(np.median([d[0] for d in cluster_dets]))
-        face_ymin = float(np.median([d[1] for d in cluster_dets]))
-        face_w = float(np.median([d[2] for d in cluster_dets]))
-        face_h = float(np.median([d[3] for d in cluster_dets]))
+    def _build_bbox_from_detections(
+        self,
+        dets: list[tuple[float, float, float, float]],
+        n_sampled: int,
+    ) -> WebcamBBox:
+        """Build a WebcamBBox from a list of clustered detections."""
+        face_xmin = float(np.median([d[0] for d in dets]))
+        face_ymin = float(np.median([d[1] for d in dets]))
+        face_w = float(np.median([d[2] for d in dets]))
+        face_h = float(np.median([d[3] for d in dets]))
 
         expand_x, expand_y = 1.0, 1.5
         xmin = max(0.0, face_xmin - face_w * expand_x * 0.5)
@@ -259,7 +278,7 @@ class WebcamDetector:
 
         cx, cy = xmin + width / 2, ymin + height / 2
         edge_distance = float(min(cx, cy, 1.0 - cx, 1.0 - cy))
-        stability_score = float(mask.sum()) / n_sampled
+        stability_score = float(len(dets)) / n_sampled
 
         return WebcamBBox(
             xmin=xmin, ymin=ymin, width=width, height=height,
@@ -381,7 +400,11 @@ class _OWLv2Backend:
         logger.info("OWLv2 loaded (prompt=%r)", self.prompt)
 
     def detect_frame(self, frame: np.ndarray) -> list[tuple[float, float, float, float]]:
-        """Detect webcam overlay in a single BGR frame."""
+        """Detect webcam overlay in a single BGR frame.
+
+        Returns ALL detections above threshold (not just best), so
+        clustering has more data points to distinguish webcam from NPC.
+        """
         self._init()
         import torch
         from PIL import Image
@@ -415,17 +438,20 @@ class _OWLv2Backend:
         if len(scores) == 0:
             return []
 
-        # Keep only the highest-confidence detection per frame
-        best_idx = int(scores.argmax())
-        box = boxes[best_idx]
-        x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
-        best_bbox = (
-            float(x1 / w), float(y1 / h),
-            float((x2 - x1) / w), float((y2 - y1) / h),
-        )
+        bboxes = []
+        for i in range(len(scores)):
+            box = boxes[i]
+            x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
+            bw, bh = (x2 - x1) / w, (y2 - y1) / h
+            if bw <= 0 or bh <= 0:
+                continue
+            bboxes.append((
+                float(x1 / w), float(y1 / h),
+                float(bw), float(bh),
+            ))
 
-        logger.debug("OWLv2: %d candidates, best score=%.3f", len(scores), scores[best_idx])
-        return [best_bbox]
+        logger.debug("OWLv2: %d detections above threshold %.2f", len(bboxes), self.min_confidence)
+        return bboxes
 
 
 # ---------------------------------------------------------------------------

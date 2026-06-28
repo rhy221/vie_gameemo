@@ -25,6 +25,36 @@ logger = logging.getLogger(__name__)
 
 _LABEL_NAMES = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
+
+def _maybe_balanced_sampler(train_loader: DataLoader, cfg) -> DataLoader:
+    """Rebuild train_loader with WeightedRandomSampler if config requests it."""
+    from torch.utils.data import WeightedRandomSampler
+
+    sampler_type = getattr(getattr(cfg, "classifier", None), "sampler", "none")
+    if sampler_type != "balanced_batch":
+        return train_loader
+
+    n_classes = getattr(cfg.classifier, "n_classes", len(_LABEL_NAMES))
+    all_labels = [item["label"] for item in train_loader.dataset.items]
+    class_counts = torch.zeros(n_classes)
+    for lbl in all_labels:
+        class_counts[lbl] += 1
+    sample_weights = 1.0 / class_counts.clamp(min=1.0)
+    per_sample_weight = [float(sample_weights[lbl]) for lbl in all_labels]
+
+    sampler = WeightedRandomSampler(
+        per_sample_weight, num_samples=len(per_sample_weight), replacement=True,
+    )
+    logger.info("Using balanced_batch sampler for LLM training (oversampling rare classes)")
+    return DataLoader(
+        train_loader.dataset,
+        batch_size=train_loader.batch_size,
+        sampler=sampler,
+        num_workers=train_loader.num_workers,
+        pin_memory=train_loader.pin_memory,
+        collate_fn=train_loader.collate_fn,
+    )
+
 _LLM_PERCEPTION_PROMPT = (
     "Dựa trên đặc trưng đa phương thức của clip game livestream, "
     "hãy xác định cảm xúc của streamer.\n"
@@ -145,6 +175,9 @@ def train_llm_perception(
         weight_decay=getattr(pcfg, "weight_decay", 0.01),
     )
 
+    # Balanced sampler for LLM perception (same imbalance problem)
+    train_loader = _maybe_balanced_sampler(train_loader, cfg)
+
     n_epochs = lp_cfg.epochs
     n_steps = len(train_loader) * n_epochs
     warmup_steps = max(1, int(n_steps * getattr(pcfg, "warmup_ratio", 0.1)))
@@ -191,7 +224,10 @@ def train_llm_perception(
             if isinstance(fused, tuple):
                 fused = fused[0]
 
-            soft_tokens = llm_adapter(fused).mean(dim=1, keepdim=True)  # (B, 1, H)
+            soft_tokens, soft_mask = llm_adapter(
+                fused, audio=audio, face=face, context=context,
+                text=text_feat, has_face=has_face,
+            )
 
             # Build per-sample prompts + targets
             prompts = []
@@ -225,20 +261,18 @@ def train_llm_perception(
             embed_fn = llm.get_input_embeddings()
             full_embeds = embed_fn(full["input_ids"])  # (B, L, H)
 
-            # Prepend soft token
-            inputs_embeds = torch.cat([soft_tokens, full_embeds], dim=1)  # (B, 1+L, H)
-            attn_mask = torch.cat([
-                torch.ones(B, 1, device=device, dtype=torch.long),
-                full["attention_mask"],
-            ], dim=1)
+            # Prepend soft tokens (multi-stream: fusion + per-modality)
+            n_soft = soft_tokens.shape[1]
+            inputs_embeds = torch.cat([soft_tokens, full_embeds], dim=1)
+            attn_mask = torch.cat([soft_mask, full["attention_mask"]], dim=1)
 
-            # Labels: mask soft token + prompt tokens, only compute loss on target tokens
+            # Labels: mask soft tokens + prompt tokens, only compute loss on target tokens
             lm_labels = full["input_ids"].clone()
             for i in range(B):
                 prompt_len = prompt_only["attention_mask"][i].sum().item()
                 lm_labels[i, :prompt_len] = -100
             lm_labels = torch.cat([
-                torch.full((B, 1), -100, device=device, dtype=torch.long),
+                torch.full((B, n_soft), -100, device=device, dtype=torch.long),
                 lm_labels,
             ], dim=1)
 
@@ -337,7 +371,10 @@ def _eval_llm_metrics(
             fused = fusion(audio, face, context, text_feat, has_face=has_face)
             if isinstance(fused, tuple):
                 fused = fused[0]
-            soft_tokens = llm_adapter(fused).mean(dim=1, keepdim=True)
+            soft_tokens, _ = llm_adapter(
+                fused, audio=audio, face=face, context=context,
+                text=text_feat, has_face=has_face,
+            )
 
             for i in range(min(B, n_samples - total)):
                 gt_idx = gt_labels[i].item()
@@ -534,7 +571,7 @@ def train_cognition(
     if llm_perception_checkpoint and Path(llm_perception_checkpoint).exists():
         lp_ckpt = torch.load(llm_perception_checkpoint, map_location="cpu")
         if "llm_adapter" in lp_ckpt:
-            llm_adapter.load_state_dict(lp_ckpt["llm_adapter"])
+            llm_adapter.load_state_dict(lp_ckpt["llm_adapter"], strict=False)
             logger.info("Loaded ModalAdapter from Stage 2a: %s", llm_perception_checkpoint)
         if "llm_peft" in lp_ckpt and lp_ckpt["llm_peft"] is not None:
             llm.load_state_dict(lp_ckpt["llm_peft"], strict=False)
@@ -543,6 +580,9 @@ def train_cognition(
         logger.info("No Stage 2a checkpoint — starting ModalAdapter + LoRA from scratch")
 
     cls_criterion = FocalLoss(gamma=ccfg.loss.focal.gamma)
+
+    # Balanced sampler for cognition
+    train_loader = _maybe_balanced_sampler(train_loader, cfg)
 
     trainable_params = list(llm.parameters()) + list(llm_adapter.parameters())
     optimizer = torch.optim.AdamW(
@@ -604,7 +644,11 @@ def train_cognition(
             reasoning_texts = batch.get("reasoning_text")
             if reasoning_texts:
                 B = fused.shape[0]
-                soft_token = llm_adapter(fused).mean(dim=1, keepdim=True)  # (B, 1, H)
+                soft_tokens, soft_mask = llm_adapter(
+                    fused, audio=audio, face=face, context=context,
+                    text=text, has_face=has_face,
+                )
+                n_soft = soft_tokens.shape[1]
 
                 inputs = tokenizer(
                     list(reasoning_texts),
@@ -617,13 +661,10 @@ def train_cognition(
                 embed_fn = llm.get_input_embeddings()
                 text_embeds = embed_fn(inputs["input_ids"])
 
-                inputs_embeds = torch.cat([soft_token, text_embeds], dim=1)
-                attn_mask = torch.cat([
-                    torch.ones(B, 1, device=device, dtype=torch.long),
-                    inputs["attention_mask"],
-                ], dim=1)
+                inputs_embeds = torch.cat([soft_tokens, text_embeds], dim=1)
+                attn_mask = torch.cat([soft_mask, inputs["attention_mask"]], dim=1)
                 lm_labels = torch.cat([
-                    torch.full((B, 1), -100, device=device, dtype=torch.long),
+                    torch.full((B, n_soft), -100, device=device, dtype=torch.long),
                     inputs["input_ids"],
                 ], dim=1)
 

@@ -221,7 +221,7 @@ class LLM4RLVR(BaseLLMReasoner):
             self.load()
 
         if "fusion_emb" in evidence and self.modal_adapter is not None:
-            return self._reason_with_embeddings(evidence["fusion_emb"])
+            return self._reason_with_embeddings(evidence)
 
         prompt = LLM2CoReasoner.build_prompt(evidence)
 
@@ -234,20 +234,27 @@ class LLM4RLVR(BaseLLMReasoner):
         reasoning, answer, fmt_valid = LLM1Explainer.parse_output(raw)
         return LLMOutput(reasoning=reasoning, answer=answer, raw=raw, format_valid=fmt_valid)
 
-    def _reason_with_embeddings(self, fusion_emb: torch.Tensor) -> LLMOutput:
-        """Annotation-free path: inject fusion embedding as soft token via modal adapter.
+    def _reason_with_embeddings(self, evidence: dict) -> LLMOutput:
+        """Annotation-free path: inject fusion + raw modality embeddings as soft tokens.
 
         Args:
-            fusion_emb: (1, T, d_fusion) fused embedding from ConvAttention4M.
+            evidence: Dict with 'fusion_emb' and optional raw modality embeddings.
 
         Returns:
             LLMOutput from soft-token-conditioned generation.
         """
         from vie_gameemo.llm.llm1_explainer import LLM1Explainer
 
-        fusion_emb = fusion_emb.to(self.device)
+        fusion_emb = evidence["fusion_emb"].to(self.device)
         with torch.no_grad():
-            soft_token = self.modal_adapter(fusion_emb).mean(dim=1, keepdim=True)  # (1, 1, H)
+            soft_tokens, _ = self.modal_adapter(
+                fusion_emb,
+                audio=evidence.get("audio_emb"),
+                face=evidence.get("face_emb"),
+                context=evidence.get("context_emb"),
+                text=evidence.get("text_emb"),
+                has_face=evidence.get("has_face"),
+            )
 
             instruction = (
                 "Dựa trên đặc trưng đa phương thức của clip game, hãy phân tích "
@@ -255,9 +262,9 @@ class LLM4RLVR(BaseLLMReasoner):
                 "<think>[lý luận]</think><answer>[nhãn]</answer>."
             )
             text_ids = self.tokenizer.encode(instruction, return_tensors="pt").to(self.device)
-            text_embeds = self.model.get_input_embeddings()(text_ids)  # (1, L, H)
+            text_embeds = self.model.get_input_embeddings()(text_ids)
 
-            inputs_embeds = torch.cat([soft_token, text_embeds], dim=1)  # (1, 1+L, H)
+            inputs_embeds = torch.cat([soft_tokens, text_embeds], dim=1)
 
             out_ids = self.model.generate(
                 inputs_embeds=inputs_embeds,

@@ -123,7 +123,14 @@ class LLM3PureReasoner(BaseLLMReasoner):
         fusion_emb = evidence["fusion_emb"].to(self.device)
 
         with torch.no_grad():
-            soft_token = self.modal_adapter(fusion_emb).mean(dim=1, keepdim=True)
+            soft_tokens, _ = self.modal_adapter(
+                fusion_emb,
+                audio=evidence.get("audio_emb"),
+                face=evidence.get("face_emb"),
+                context=evidence.get("context_emb"),
+                text=evidence.get("text_emb"),
+                has_face=evidence.get("has_face"),
+            )
 
             prompt = _PURE_REASON_PROMPT.format(
                 emotion_categories=", ".join(_VALID_LABELS),
@@ -131,8 +138,7 @@ class LLM3PureReasoner(BaseLLMReasoner):
             text_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
             text_embeds = self.model.get_input_embeddings()(text_ids)
 
-            # [soft_token | prompt_tokens]
-            inputs_embeds = torch.cat([soft_token, text_embeds], dim=1)
+            inputs_embeds = torch.cat([soft_tokens, text_embeds], dim=1)
 
             out_ids = self.model.generate(
                 inputs_embeds=inputs_embeds,
