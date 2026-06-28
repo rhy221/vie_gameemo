@@ -176,11 +176,22 @@ def _run_eval(cfg, args) -> dict:
     cm = metrics.pop("confusion_matrix").tolist()
     metrics["confusion_matrix"] = cm
 
+    # Per-sample predictions (for misclassification analysis)
+    predictions = []
+    for m in all_meta:
+        predictions.append({
+            "clip_id": m["clip_id"],
+            "gt": _EMOTION_LABELS[m["y_true"]] if m["y_true"] < len(_EMOTION_LABELS) else str(m["y_true"]),
+            "pred": _EMOTION_LABELS[m["y_pred"]] if m["y_pred"] < len(_EMOTION_LABELS) else str(m["y_pred"]),
+            "correct": m["y_true"] == m["y_pred"],
+        })
+
     result: dict = {
         "split": args.split,
         "checkpoint": str(args.checkpoint),
         "n_samples": len(all_labels),
         "metrics": metrics,
+        "predictions": predictions,
     }
 
     if args.per_genre:
