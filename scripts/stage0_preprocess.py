@@ -131,6 +131,11 @@ def main() -> int:
             bbox = detector.detect_webcam_region(video_path)
             bbox_map[clip_id] = bbox.__dict__ if bbox else None
 
+            # Save incrementally every 50 clips to avoid losing progress on crash
+            if len(bbox_map) % 50 == 0:
+                write_json(bbox_map, webcam_bbox_file)
+                logger.info("Checkpoint: saved %d webcam bboxes", len(bbox_map))
+
     if n_skipped:
         logger.info("Skipped %d already-processed clips (resume mode)", n_skipped)
 

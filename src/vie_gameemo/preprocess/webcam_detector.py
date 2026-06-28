@@ -409,21 +409,23 @@ class _OWLv2Backend:
             outputs, threshold=self.min_confidence, target_sizes=target_sizes,
         )[0]
 
-        bboxes = []
         boxes = results["boxes"].cpu().numpy()
         scores = results["scores"].cpu().numpy()
 
-        for box, score in zip(boxes, scores):
-            x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
-            bboxes.append((
-                float(x1 / w), float(y1 / h),
-                float((x2 - x1) / w), float((y2 - y1) / h),
-            ))
+        if len(scores) == 0:
+            return []
 
-        if bboxes:
-            logger.debug("OWLv2: %d detections (best score=%.3f)", len(bboxes), scores.max())
+        # Keep only the highest-confidence detection per frame
+        best_idx = int(scores.argmax())
+        box = boxes[best_idx]
+        x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
+        best_bbox = (
+            float(x1 / w), float(y1 / h),
+            float((x2 - x1) / w), float((y2 - y1) / h),
+        )
 
-        return bboxes
+        logger.debug("OWLv2: %d candidates, best score=%.3f", len(scores), scores[best_idx])
+        return [best_bbox]
 
 
 # ---------------------------------------------------------------------------
