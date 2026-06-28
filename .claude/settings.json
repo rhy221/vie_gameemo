@@ -9,7 +9,8 @@
       "PowerShell($env:PYTHONPATH = \"src\"; python -c \"from vie_gameemo.llm.llm2_coreasoner import LLM2CoReasoner; print\\(LLM2CoReasoner.build_prompt\\({'transcript': 'test', 'face_aus': 'AU12=3.5'}\\)\\)\")",
       "PowerShell($env:PYTHONPATH = \"src\"; $env:PYTHONIOENCODING = \"utf-8\"; python -c \"from vie_gameemo.llm.llm2_coreasoner import LLM2CoReasoner; p = LLM2CoReasoner.build_prompt\\({'transcript': 'test'}\\); print\\(type\\(p\\).__name__, len\\(p\\)\\)\")",
       "PowerShell($env:PYTHONPATH = \"src\"; $env:PYTHONIOENCODING = \"utf-8\"; python -c \"from vie_gameemo.training.cognition import train_cognition, train_llm_perception; import inspect; sig = inspect.signature\\(train_cognition\\); print\\('train_cognition params:', list\\(sig.parameters.keys\\(\\)\\)\\); sig2 = inspect.signature\\(train_llm_perception\\); print\\('train_llm_perception params:', list\\(sig2.parameters.keys\\(\\)\\)\\)\")",
-      "Bash(python -m pytest tests/ -x -q)"
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(python -c ' *)"
     ],
     "additionalDirectories": [
       "C:\\Projects\\music_app_backend\\services\\recommend-service"

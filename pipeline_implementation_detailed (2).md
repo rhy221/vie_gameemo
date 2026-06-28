@@ -1408,7 +1408,7 @@ Fusion_v2 được init warm từ fusion_v1 rồi fine-tune thêm với lr thấ
 
 | Setup | Input | Output | Training | Quyết định nhãn? |
 |---|---|---|---|---|
-| **LLM-1: Explainer** | soft token + nhãn MLP | Giải thích | Không (zero-shot) | ❌ Luôn trả về nhãn MLP |
+| **LLM-1: Explainer** | soft token + nhãn MLP | Giải thích | LLM Perception (căn chỉnh soft token) | ❌ Luôn trả về nhãn MLP |
 | **LLM-2: Co-Reasoner** | soft token + nhãn MLP (hint) | Reasoning + nhãn | LLM Perception | ✅ Có thể override MLP |
 | **LLM-3: Pure Reasoner** | soft token only | Reasoning + nhãn | LLM Perception | ✅ Tự dự đoán hoàn toàn |
 | **LLM-4: RLVR-trained** | soft token only | Reasoning + nhãn | LLM Perception + RLVR | ✅ Tự dự đoán + structured |
@@ -1416,14 +1416,13 @@ Fusion_v2 được init warm từ fusion_v1 rồi fine-tune thêm với lr thấ
 **Quan trọng:** Tất cả LLM đều chỉ cần **GT labels** để train LLM Perception. Annotated descriptions
 (từ multi-agent pipeline) chỉ cần cho Cognition training (optional, cải thiện reasoning quality).
 
-### 9.2. Setup LLM-1 — Explainer (không train)
+### 9.2. Setup LLM-1 — Explainer (train LLM Perception để căn chỉnh soft token)
 
 **File:** `src/vie_gameemo/llm/llm1_explainer.py`
 
 Nhận nhãn MLP + soft token → giải thích tại sao nhãn đúng. **Không bao giờ override nhãn MLP.**
 
-- Nếu có ModalAdapter (đã train LLM Perception): dùng soft token — chất lượng tốt
-- Nếu chưa có: fallback text-only prompt (chỉ có nhãn + transcript — chất lượng kém)
+Cần train LLM Perception (ModalAdapter + LoRA) để căn chỉnh soft token — nếu không, LLM không hiểu được embedding từ fusion và không thể giải thích chính xác.
 
 ### 9.3. Setup LLM-2 — Co-Reasoner (train LLM Perception)
 
@@ -1434,7 +1433,7 @@ Prompt nói rõ "đây chỉ là gợi ý — có thể đúng hoặc sai".
 
 ### 9.4. Setup LLM-3 — Pure Reasoner (train LLM Perception)
 
-**File:** `src/vie_gameemo/llm/llm3_vlm.py` (đã đổi từ VLM sang Pure Reasoner)
+**File:** `src/vie_gameemo/llm/llm3_pure_reasoner.py`
 
 Chỉ nhận soft token, **không biết nhãn MLP** → tự dự đoán hoàn toàn từ fusion embedding.
 Đây là test thực sự: LLM có học được emotion signal từ soft token không?
@@ -1573,10 +1572,10 @@ phương thức dẫn đến kết luận]
 |---|---|---|---|---|
 | Input | soft token + nhãn MLP | soft token + nhãn hint | soft token only | soft token only |
 | Quyết định nhãn | Không (giải thích) | Có (override MLP) | Có (tự dự đoán) | Có (tự dự đoán) |
-| Training cần | Không (hoặc LLM Perception cho soft token) | LLM Perception | LLM Perception | LLM Perception + RLVR |
+| Training cần | LLM Perception (căn chỉnh soft token) | LLM Perception | LLM Perception | LLM Perception + RLVR |
 | Data cần | GT labels | GT labels | GT labels | GT labels |
-| Compute (train) | 0 | Low | Low | **Highest** |
-| Reasoning quality | Trung bình (zero-shot) | Cao | Cao | **Cao + structured** |
+| Compute (train) | Low | Low | Low | **Highest** |
+| Reasoning quality | Trung bình (chỉ giải thích) | Cao | Cao | **Cao + structured** |
 | OOD generalization | N/A | Trung bình | Trung bình | **+10-15%** (R1-Omni) |
 | Cần A100? | Không | Không | Không | **Có hoặc 0.5B model** |
 
