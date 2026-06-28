@@ -83,8 +83,9 @@ def train_perception(
     class_weight_method = getattr(loss_cfg, "class_weights", "none")
     alpha = getattr(loss_cfg.focal, "alpha", 1.0)
 
+    all_train_labels = [item["label"] for item in train_loader.dataset.items]
+
     if class_weight_method != "none":
-        all_train_labels = [item["label"] for item in train_loader.dataset.items]
         alpha = make_class_weights(all_train_labels, ccfg.n_classes, method=class_weight_method)
         logger.info("Using %s class weights: %s", class_weight_method, alpha)
 
@@ -92,6 +93,30 @@ def train_perception(
         gamma=getattr(loss_cfg.focal, "gamma", 2.0),
         alpha=alpha,
     )
+
+    # Balanced batch sampler: oversample rare classes so each batch is balanced
+    sampler_type = getattr(ccfg, "sampler", "none")
+    if sampler_type == "balanced_batch":
+        from torch.utils.data import WeightedRandomSampler
+
+        class_counts = torch.zeros(ccfg.n_classes)
+        for lbl in all_train_labels:
+            class_counts[lbl] += 1
+        sample_weights = 1.0 / class_counts.clamp(min=1.0)
+        per_sample_weight = [float(sample_weights[lbl]) for lbl in all_train_labels]
+
+        sampler = WeightedRandomSampler(
+            per_sample_weight, num_samples=len(per_sample_weight), replacement=True,
+        )
+        train_loader = DataLoader(
+            train_loader.dataset,
+            batch_size=train_loader.batch_size,
+            sampler=sampler,
+            num_workers=train_loader.num_workers,
+            pin_memory=train_loader.pin_memory,
+            collate_fn=train_loader.collate_fn,
+        )
+        logger.info("Using balanced_batch sampler (oversampling rare classes)")
 
     params = list(fusion.parameters()) + list(classifier.parameters())
     optimizer = torch.optim.AdamW(

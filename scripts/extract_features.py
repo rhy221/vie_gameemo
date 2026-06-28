@@ -109,9 +109,9 @@ def main() -> int:
 
     video_index: dict[str, Path] = {}
     if "audio" in args.modalities:
-        from vie_gameemo.encoders.audio_ast import ASTAudioEncoder
+        from vie_gameemo.encoders.audio_whisper import WhisperAudioEncoder
         logger.info("Loading audio encoder...")
-        encoders["audio"] = ASTAudioEncoder(
+        encoders["audio"] = WhisperAudioEncoder(
             model_name=cfg.audio_encoder.model_name,
             target_tokens=cfg.audio_encoder.target_tokens,
             sample_rate=cfg.preprocess.audio.sample_rate,
@@ -210,10 +210,14 @@ def main() -> int:
 
         if "face" in encoders:
             if strategy == "full_frame":
-                # Strategy A: full-frame → ViT-FER (no webcam crop)
-                full_crops = [cv2.imread(str(fp)) for fp in frame_paths]
-                full_crops = [c for c in full_crops if c is not None]
-                feat, _ = encoders["face"].encode(full_crops if full_crops else None)
+                # Strategy A: no webcam detection, but still crop face via MediaPipe
+                from vie_gameemo.preprocess.face_crop import _tight_face_crop
+                crops = []
+                for fp in frame_paths:
+                    frame = cv2.imread(str(fp))
+                    if frame is not None:
+                        crops.append(_tight_face_crop(frame, fallback=frame))
+                feat, _ = encoders["face"].encode(crops if crops else None)
                 features["face"] = feat.squeeze(0)
             elif has_face and resolved_bbox is not None and frame_paths:
                 # Strategy B/C: crop face on-the-fly từ bbox + frames

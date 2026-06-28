@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 
 _STRATEGY_CONFIGS: dict[str, dict] = {
     "A": {
-        "description": "Full-frame baseline (no webcam detection)",
+        "description": "Full-frame baseline (no webcam detection, MediaPipe face crop + full-frame context)",
         "face_source": "full_frame",
-        "use_context": False,
+        "use_context": True,
     },
     "B": {
         "description": "Face-only (webcam detect + crop, no context)",

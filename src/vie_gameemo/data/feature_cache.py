@@ -1,6 +1,6 @@
 """Feature caching: precompute frozen encoder outputs.
 
-Since encoders (AST, ViT-FER, ViT-ImageNet, XLM-R) are frozen during
+Since encoders (Whisper, ViT-FER, ViT-ImageNet, XLM-R) are frozen during
 training, running them every batch wastes compute. This module precomputes
 their outputs once and stores as .pt files.
 

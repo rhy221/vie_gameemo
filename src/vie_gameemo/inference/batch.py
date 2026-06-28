@@ -203,13 +203,29 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
 
     # Detect webcam region for context encoder
     from vie_gameemo.preprocess.webcam_detector import WebcamDetector
-    detector = WebcamDetector()
+    wc = getattr(cfg, "visual_encoder", None)
+    wc = getattr(wc, "webcam_detector", None) if wc else None
+    if wc is not None:
+        owlv2_cfg = getattr(wc, "owlv2", None)
+        detector = WebcamDetector(
+            backend=getattr(wc, "backend", "owlv2"),
+            min_detection_confidence=getattr(wc, "min_detection_confidence", 0.1),
+            sample_n_frames=getattr(wc, "sample_n_frames", 30),
+            dbscan_eps=getattr(getattr(wc, "clustering", None), "eps", 0.08) if getattr(wc, "clustering", None) else 0.08,
+            dbscan_min_samples=getattr(getattr(wc, "clustering", None), "min_samples", 3) if getattr(wc, "clustering", None) else 3,
+            stability_threshold=getattr(wc, "stability_threshold", 0.3),
+            edge_bias=getattr(wc, "edge_bias", 0.3),
+            owlv2_model=getattr(owlv2_cfg, "model", "google/owlv2-base-patch16-finetuned") if owlv2_cfg else "google/owlv2-base-patch16-finetuned",
+            owlv2_prompt=getattr(owlv2_cfg, "prompt", "facecam overlay") if owlv2_cfg else "facecam overlay",
+        )
+    else:
+        detector = WebcamDetector(backend="owlv2", min_detection_confidence=0.1, stability_threshold=0.3)
     webcam_bbox = detector.detect_webcam_region(clip_path)
 
     features: dict = {}
 
-    from vie_gameemo.encoders.audio_ast import ASTAudioEncoder
-    audio_enc = ASTAudioEncoder()
+    from vie_gameemo.encoders.audio_whisper import WhisperAudioEncoder
+    audio_enc = WhisperAudioEncoder()
     features["audio"] = audio_enc.encode(audio_path)
     del audio_enc
 
@@ -283,10 +299,17 @@ def _features_to_evidence(
     fusion_emb = prediction.get("fusion_emb")
 
     if not has_annotation and fusion_emb is not None:
-        return {
+        evidence = {
             "fusion_emb": fusion_emb,
             "label": prediction.get("label", "neutral"),
         }
+        for key in ("audio", "face", "context", "text"):
+            raw = features.get(key)
+            if raw is not None:
+                evidence[f"{key}_emb"] = raw.unsqueeze(0) if raw.dim() == 2 else raw
+        if "has_face" in features:
+            evidence["has_face"] = torch.tensor([features["has_face"]], dtype=torch.bool)
+        return evidence
 
     return {
         "face_aus": features.get("face_aus", "N/A"),
