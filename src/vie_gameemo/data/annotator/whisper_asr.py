@@ -18,14 +18,17 @@ _GAMING_PROMPT_VI = (
     "Đây là livestream game của streamer Việt Nam. "
     "Streamer hay nói: GG, clutch, ace, headshot, MVP, noob, lag, buff, nerf, "
     "rank, bot, carry, feed, gank, roam, farm, push, die, kill, team, "
-    "ơi trời, vãi, thôi rồi, ăn rồi, xong rồi, đi nào, vào nào."
+    "ơi trời, vãi, thôi rồi, ăn rồi, xong rồi, đi nào, vào nào, "
+    "địt mẹ, đéo, đụ má, cái lồn, vãi lồn, chó, ngu, đồ ngu, cứt, "
+    "mẹ mày, bố mày, wtf, shit."
 )
 
 _GAMING_PROMPT_EN = (
     "This is a game livestream. The streamer often says: "
     "GG, clutch, ace, headshot, MVP, noob, lag, buff, nerf, "
     "rank, bot, carry, feed, gank, roam, farm, push, die, kill, team, "
-    "let's go, oh my god, no way, come on."
+    "let's go, oh my god, no way, come on, "
+    "what the fuck, shit, damn, fuck, bro, dude."
 )
 
 _LANG_CONFIGS = {
@@ -97,10 +100,11 @@ class WhisperASR:
         model_name: str = "openai/whisper-large-v3",
         compute_type: str = "int8_float16",
         vad_filter: bool = True,
-        no_speech_threshold: float = 0.45,
+        no_speech_threshold: float = 0.6,
         beam_size: int = 5,
         condition_on_previous_text: bool = False,
-        log_prob_threshold: float = -1.0,
+        log_prob_threshold: float = -0.5,
+        hallucination_silence_threshold: float = 2.0,
         lang_configs: dict | None = None,
     ) -> None:
         self.model_name = model_name
@@ -110,6 +114,7 @@ class WhisperASR:
         self.beam_size = beam_size
         self.condition_on_previous_text = condition_on_previous_text
         self.log_prob_threshold = log_prob_threshold
+        self.hallucination_silence_threshold = hallucination_silence_threshold
         self.lang_configs = lang_configs or dict(_LANG_CONFIGS)
         self.model = None
 
@@ -177,6 +182,7 @@ class WhisperASR:
             "beam_size": self.beam_size,
             "condition_on_previous_text": self.condition_on_previous_text,
             "log_prob_threshold": self.log_prob_threshold,
+            "hallucination_silence_threshold": self.hallucination_silence_threshold,
             "word_timestamps": False,
         }
 
@@ -449,9 +455,11 @@ def build_asr(asr_cfg) -> tuple:
                 model_name=getattr(w, "model_name", "openai/whisper-large-v3"),
                 compute_type=getattr(w, "compute_type", "int8_float16"),
                 vad_filter=getattr(w, "vad_filter", True),
-                no_speech_threshold=getattr(w, "no_speech_threshold", 0.45),
+                no_speech_threshold=getattr(w, "no_speech_threshold", 0.6),
                 beam_size=getattr(w, "beam_size", 5),
                 condition_on_previous_text=getattr(w, "condition_on_previous_text", False),
+                log_prob_threshold=getattr(w, "log_prob_threshold", -0.5),
+                hallucination_silence_threshold=getattr(w, "hallucination_silence_threshold", 2.0),
                 lang_configs=lang_configs,
             )
         logger.info("ASR backend: PhoWhisper (%s) with Whisper fallback for EN", ph.model_name)
@@ -462,9 +470,11 @@ def build_asr(asr_cfg) -> tuple:
             model_name=getattr(w, "model_name", "openai/whisper-large-v3"),
             compute_type=getattr(w, "compute_type", "int8_float16"),
             vad_filter=getattr(w, "vad_filter", True),
-            no_speech_threshold=getattr(w, "no_speech_threshold", 0.45),
+            no_speech_threshold=getattr(w, "no_speech_threshold", 0.6),
             beam_size=getattr(w, "beam_size", 5),
             condition_on_previous_text=getattr(w, "condition_on_previous_text", False),
+            log_prob_threshold=getattr(w, "log_prob_threshold", -0.5),
+            hallucination_silence_threshold=getattr(w, "hallucination_silence_threshold", 2.0),
             lang_configs=lang_configs,
         )
         logger.info("ASR backend: Whisper (%s)", getattr(w, "model_name", "large-v3"))

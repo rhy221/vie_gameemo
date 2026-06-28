@@ -154,7 +154,7 @@ annotation:
   # ASR for transcript — chọn backend tại annotation.asr.backend
   asr:
     backend: "whisper"          # "whisper" | "phowhisper"
-    language_routing: "metadata"  # metadata (default) | auto | force
+    language_routing: "auto"      # auto (detect per clip) | metadata | force
     force_language: "vi"
     detect_for_validation: true   # always run detect for audit, NOT to override
     lang_prob_threshold: 0.6      # only used when routing == auto
@@ -169,16 +169,18 @@ annotation:
       model_name: "openai/whisper-large-v3"
       compute_type: "int8_float16"
       vad_filter: true
-      no_speech_threshold: 0.45
+      no_speech_threshold: 0.6
       beam_size: 5
       condition_on_previous_text: false
+      log_prob_threshold: -0.5
+      hallucination_silence_threshold: 2.0
       vi:
         language: "vi"
-        initial_prompt: "Đây là livestream game của streamer Việt Nam. Streamer hay nói: GG, clutch, ace, headshot, MVP, noob, lag, buff, nerf, rank, bot, carry, feed, gank, roam, farm, push, die, kill, team, ơi trời, vãi, thôi rồi, ăn rồi, xong rồi, đi nào, vào nào."
+        initial_prompt: "Đây là livestream game của streamer Việt Nam. Streamer hay nói: GG, clutch, ace, headshot, MVP, noob, lag, buff, nerf, rank, bot, carry, feed, gank, roam, farm, push, die, kill, team, ơi trời, vãi, thôi rồi, ăn rồi, xong rồi, đi nào, vào nào, địt mẹ, đéo, đụ má, cái lồn, vãi lồn, chó, ngu, đồ ngu, cứt, mẹ mày, bố mày, wtf, shit."
         post_process: "bartpho"
       en:
         language: "en"
-        initial_prompt: "This is a game livestream. The streamer often says: GG, clutch, ace, headshot, MVP, noob, lag, buff, nerf, rank, bot, carry, feed, gank, roam, farm, push, die, kill, team, let's go, oh my god, no way, come on."
+        initial_prompt: "This is a game livestream. The streamer often says: GG, clutch, ace, headshot, MVP, noob, lag, buff, nerf, rank, bot, carry, feed, gank, roam, farm, push, die, kill, team, let's go, oh my god, no way, come on, what the fuck, shit, damn, fuck, bro, dude."
         post_process: "none"
 
     # HuggingFace transformers pipeline (VinAI PhoWhisper — fine-tuned on Vietnamese)
