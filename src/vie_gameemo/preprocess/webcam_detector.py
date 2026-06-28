@@ -397,7 +397,15 @@ class _OWLv2Backend:
             outputs = self._model(**inputs)
 
         target_sizes = torch.tensor([[h, w]], device=self._device)
-        results = self._processor.post_process_object_detection(
+        post_process = getattr(
+            self._processor, "post_process_object_detection",
+            getattr(self._processor, "post_process_grounded_object_detection", None),
+        )
+        if post_process is None:
+            logger.warning("OWLv2 processor has no post_process method — using raw outputs")
+            return []
+
+        results = post_process(
             outputs, threshold=self.min_confidence, target_sizes=target_sizes,
         )[0]
 
@@ -406,7 +414,7 @@ class _OWLv2Backend:
         scores = results["scores"].cpu().numpy()
 
         for box, score in zip(boxes, scores):
-            y1, x1, y2, x2 = box[0], box[1], box[2], box[3]
+            x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
             bboxes.append((
                 float(x1 / w), float(y1 / h),
                 float((x2 - x1) / w), float((y2 - y1) / h),
