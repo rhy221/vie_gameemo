@@ -369,8 +369,14 @@ class _OWLv2Backend:
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info("Loading OWLv2: %s (device=%s)", self.model_name, self._device)
-        self._processor = Owlv2Processor.from_pretrained(self.model_name)
-        self._model = Owlv2ForObjectDetection.from_pretrained(self.model_name).to(self._device)
+        try:
+            self._processor = Owlv2Processor.from_pretrained(self.model_name)
+            self._model = Owlv2ForObjectDetection.from_pretrained(self.model_name).to(self._device)
+        except (ValueError, OSError):
+            # Fallback: safetensors available on PR branch for older torch
+            logger.info("Retrying OWLv2 with safetensors revision...")
+            self._processor = Owlv2Processor.from_pretrained(self.model_name, revision="refs/pr/5")
+            self._model = Owlv2ForObjectDetection.from_pretrained(self.model_name, revision="refs/pr/5").to(self._device)
         self._model.eval()
         logger.info("OWLv2 loaded (prompt=%r)", self.prompt)
 
