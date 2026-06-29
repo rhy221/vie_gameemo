@@ -494,10 +494,12 @@ class _YOLOBackend:
         self._init()
         h, w = frame.shape[:2]
 
+        import torch as _torch
         results = self._model.predict(
             frame,
             conf=self.min_confidence,
             classes=self.classes,
+            device="cuda" if _torch.cuda.is_available() else "cpu",
             verbose=False,
         )
 
