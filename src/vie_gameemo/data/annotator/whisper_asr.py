@@ -202,7 +202,11 @@ class WhisperASR:
         for seg in segments:
             if seg.no_speech_prob > self.no_speech_threshold:
                 continue
-            parts.append(seg.text.strip())
+            seg_text = seg.text.strip()
+            if _is_hallucination(seg_text, seg):
+                logger.debug("Filtered hallucinated segment: %r", seg_text[:80])
+                continue
+            parts.append(seg_text)
         text = " ".join(parts).strip()
 
         asr_detected = info.language
@@ -414,6 +418,52 @@ class BARTphoPostProcessor:
 
     def batch_process(self, texts: list[str]) -> list[str]:
         return [self.process(t) for t in texts]
+
+
+# ---------------------------------------------------------------------------
+# Hallucination filter
+# ---------------------------------------------------------------------------
+
+import re
+
+_HALLUCINATION_PATTERNS = [
+    re.compile(r"subscribe", re.IGNORECASE),
+    re.compile(r"đăng\s*ký", re.IGNORECASE),
+    re.compile(r"like\s*(và|and)\s*share", re.IGNORECASE),
+    re.compile(r"kênh\s+\w+", re.IGNORECASE),
+    re.compile(r"cảm\s*ơn.*theo\s*dõi", re.IGNORECASE),
+    re.compile(r"đừng\s*quên", re.IGNORECASE),
+    re.compile(r"nhấn\s*(nút|chuông)", re.IGNORECASE),
+    re.compile(r"bỏ\s*lỡ", re.IGNORECASE),
+    re.compile(r"video\s*(tiếp|sau|mới)", re.IGNORECASE),
+    re.compile(r"(phụ đề|subtitle).*tự động", re.IGNORECASE),
+    re.compile(r"www\.|\.com|\.vn|http", re.IGNORECASE),
+]
+
+
+def _is_hallucination(text: str, segment=None) -> bool:
+    """Check if a transcribed segment is likely a Whisper hallucination."""
+    if not text:
+        return False
+
+    for pattern in _HALLUCINATION_PATTERNS:
+        if pattern.search(text):
+            return True
+
+    # Repetitive text (same phrase looped) — classic hallucination sign
+    words = text.split()
+    if len(words) >= 6:
+        half = len(words) // 2
+        if words[:half] == words[half:2 * half]:
+            return True
+
+    # Segment-level heuristic: very low avg_logprob often means hallucination
+    if segment is not None:
+        avg_logprob = getattr(segment, "avg_logprob", 0.0)
+        if avg_logprob < -0.7:
+            return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
