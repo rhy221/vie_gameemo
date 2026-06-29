@@ -153,13 +153,14 @@ def main() -> int:
     strategy = getattr(cfg.visual_encoder, "strategy", "dual_path")
     logger.info("Visual strategy: %s", strategy)
 
-    # Load webcam bboxes from stage0_preprocess (separate from annotations)
+    # Load webcam bboxes (only needed for face_only / dual_path strategies)
     webcam_bboxes: dict[str, dict | None] = {}
-    webcam_bbox_file = Path(cfg.paths.processed) / "webcam_bboxes.json"
-    if webcam_bbox_file.exists():
-        import json as _json
-        webcam_bboxes = _json.loads(webcam_bbox_file.read_text(encoding="utf-8"))
-        logger.info("Loaded %d webcam bboxes from %s", len(webcam_bboxes), webcam_bbox_file)
+    if strategy != "full_frame":
+        webcam_bbox_file = Path(cfg.paths.processed) / "webcam_bboxes.json"
+        if webcam_bbox_file.exists():
+            import json as _json
+            webcam_bboxes = _json.loads(webcam_bbox_file.read_text(encoding="utf-8"))
+            logger.info("Loaded %d webcam bboxes from %s", len(webcam_bboxes), webcam_bbox_file)
 
     n_done = 0
     for ann_file in annotation_files:
