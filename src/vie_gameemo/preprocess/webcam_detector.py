@@ -265,16 +265,19 @@ class WebcamDetector:
         n_sampled: int,
     ) -> WebcamBBox:
         """Build a WebcamBBox from a list of clustered detections."""
-        face_xmin = float(np.median([d[0] for d in dets]))
-        face_ymin = float(np.median([d[1] for d in dets]))
-        face_w = float(np.median([d[2] for d in dets]))
-        face_h = float(np.median([d[3] for d in dets]))
+        xmin = float(np.median([d[0] for d in dets]))
+        ymin = float(np.median([d[1] for d in dets]))
+        width = float(np.median([d[2] for d in dets]))
+        height = float(np.median([d[3] for d in dets]))
 
-        expand_x, expand_y = 1.0, 1.5
-        xmin = max(0.0, face_xmin - face_w * expand_x * 0.5)
-        ymin = max(0.0, face_ymin - face_h * expand_y * 0.3)
-        width = min(1.0 - xmin, face_w * (1.0 + expand_x))
-        height = min(1.0 - ymin, face_h * (1.0 + expand_y))
+        if self.backend != "yolo":
+            # MediaPipe/OWLv2 detect the face inside webcam — expand to
+            # approximate the full webcam overlay region
+            expand_x, expand_y = 1.0, 1.5
+            xmin = max(0.0, xmin - width * expand_x * 0.5)
+            ymin = max(0.0, ymin - height * expand_y * 0.3)
+            width = min(1.0 - xmin, width * (1.0 + expand_x))
+            height = min(1.0 - ymin, height * (1.0 + expand_y))
 
         cx, cy = xmin + width / 2, ymin + height / 2
         edge_distance = float(min(cx, cy, 1.0 - cx, 1.0 - cy))
