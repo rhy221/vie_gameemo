@@ -30,22 +30,72 @@ logger = logging.getLogger(__name__)
 _LABEL_NAMES = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
 
 
-class GHead(nn.Module):
-    """Small MLP: mean-pooled raw modality tokens → attribute vector.
+class GHeadPerModality(nn.Module):
+    """Per-modality reconstruction heads — each reads ONLY its own raw token (tap A).
 
-    Guards against the LLM shortcut of ignoring tap A (raw tokens).
+    Replaces the old global-pool GHead. Separate heads prevent strong modalities
+    from masking weaker ones and ensure each raw token retains its own cue signal.
+
+    Args:
+        d_input: Raw modality embedding dim (768).
+        hidden_dim: Hidden dim for each head.
+        n_face: Attribute dims for face (EAR/MAR/brow/yaw/pitch = 5).
+        n_voice: Attribute dims for voice (f0/rms/rate = 3).
+        n_motion: Attribute dims for motion cue (energy/impact/period = 3).
+            Only used when has_context=True (pose branch).
+        n_text: Attribute dims for text (exclaim/neg/game/words = 4).
+        has_context: Whether a context (motion) head is included.
+            Set False for vit_imagenet branch (no motion cue).
     """
 
-    def __init__(self, d_input: int = 768, hidden_dim: int = 128, n_attrs: int = 15) -> None:
+    def __init__(
+        self,
+        d_input: int = 768,
+        hidden_dim: int = 128,
+        n_face: int = 5,
+        n_voice: int = 3,
+        n_motion: int = 3,
+        n_text: int = 4,
+        has_context: bool = True,
+    ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(d_input, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, n_attrs),
-        )
+        self.has_context = has_context
 
-    def forward(self, z_raw: torch.Tensor) -> torch.Tensor:
-        return self.net(z_raw)
+        def _head(n_out: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Linear(d_input, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, n_out),
+            )
+
+        self.face_head = _head(n_face)
+        self.voice_head = _head(n_voice)
+        self.text_head = _head(n_text)
+        self.motion_head = _head(n_motion) if has_context else None
+
+    def forward(
+        self,
+        face: torch.Tensor,
+        audio: torch.Tensor,
+        context: torch.Tensor,
+        text: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Reconstruct per-modality attribute sub-vectors.
+
+        Args:
+            face: (B, T, 768) raw face encoder tokens (tap A only — NOT penult/fusion).
+            audio: (B, T, 768) raw audio encoder tokens.
+            context: (B, T, 768) raw context encoder tokens.
+            text: (B, T, 768) raw text encoder tokens.
+
+        Returns:
+            (face_pred, voice_pred, motion_pred_or_None, text_pred)
+        """
+        face_pred = self.face_head(face.mean(dim=1))
+        voice_pred = self.voice_head(audio.mean(dim=1))
+        text_pred = self.text_head(text.mean(dim=1))
+        motion_pred = self.motion_head(context.mean(dim=1)) if self.has_context else None
+        return face_pred, voice_pred, motion_pred, text_pred
 
 
 def collate_fn_llm1(batch: list[dict]) -> dict:
@@ -73,13 +123,6 @@ def collate_fn_llm1(batch: list[dict]) -> dict:
         "source_language": [b.get("source_language", "vi") for b in batch],
     }
 
-
-def _mean_pool_raw(audio, face, context, text):
-    """Mean-pool raw modality tokens → (B, 768) for g_head."""
-    parts = []
-    for t in [audio, face, context, text]:
-        parts.append(t.mean(dim=1))
-    return torch.stack(parts, dim=1).mean(dim=1)
 
 
 def _modality_dropout(audio, face, context, text, p: float = 0.3):
@@ -168,13 +211,16 @@ def train_llm1_stage_a(
     ).to(device)
 
     g_head_cfg = tcfg.g_head
-    g_head = GHead(
+    ctx_type = getattr(getattr(cfg, "visual_encoder", SimpleNamespace()), "context_encoder", SimpleNamespace())
+    ctx_encoder_type = getattr(ctx_type, "type", "vit_imagenet")
+    has_context = ctx_encoder_type == "pose"
+    g_head = GHeadPerModality(
         d_input=fcfg.d_model,
         hidden_dim=g_head_cfg.hidden_dim,
-        n_attrs=g_head_cfg.n_attrs,
+        has_context=has_context,
     ).to(device)
 
-    cue_extractor = CueExtractor(cache_dir=cfg.paths.cache)
+    cue_extractor = CueExtractor(cache_dir=cfg.paths.cache, context_encoder_type=ctx_encoder_type)
 
     trainable_params = list(adapter.parameters()) + list(g_head.parameters())
     optimizer = torch.optim.AdamW(
@@ -331,10 +377,13 @@ def train_llm1_stage_b(
     ).to(device)
 
     g_head_cfg = tcfg.g_head
-    g_head = GHead(
+    ctx_type = getattr(getattr(cfg, "visual_encoder", SimpleNamespace()), "context_encoder", SimpleNamespace())
+    ctx_encoder_type = getattr(ctx_type, "type", "vit_imagenet")
+    has_context = ctx_encoder_type == "pose"
+    g_head = GHeadPerModality(
         d_input=fcfg.d_model,
         hidden_dim=g_head_cfg.hidden_dim,
-        n_attrs=g_head_cfg.n_attrs,
+        has_context=has_context,
     ).to(device)
 
     sa_ckpt = torch.load(stage_a_checkpoint, map_location="cpu")
@@ -342,7 +391,7 @@ def train_llm1_stage_b(
     g_head.load_state_dict(sa_ckpt["g_head"])
     logger.info("Loaded Stage A checkpoint: %s", stage_a_checkpoint)
 
-    cue_extractor = CueExtractor(cache_dir=cfg.paths.cache)
+    cue_extractor = CueExtractor(cache_dir=cfg.paths.cache, context_encoder_type=ctx_encoder_type)
 
     trainable_params = list(adapter.parameters()) + list(g_head.parameters()) + list(llm.parameters())
     optimizer = torch.optim.AdamW([
@@ -434,11 +483,11 @@ def train_llm1_stage_b(
 # ------------------------------------------------------------------
 
 def _compute_loss(
-    batch, fusion, classifier, adapter, g_head, llm, tokenizer,
+    batch, fusion, classifier, adapter, g_head: "GHeadPerModality", llm, tokenizer,
     cue_extractor, device, lambda_kl, lambda_rec, kl_temp,
     modality_dropout_p=0.0,
 ):
-    """Compute L = L_LM + λ_kl * L_kl + λ_rec * L_rec."""
+    """Compute L = L_LM + λ_kl * L_kl + λ_rec * L_rec (per-modality heads)."""
     audio = batch["audio"].to(device)
     face = batch["face"].to(device)
     context = batch["context"].to(device)
@@ -518,38 +567,91 @@ def _compute_loss(
 
     total_loss = loss_lm
 
-    # --- L_rec: g_head reconstruction loss ---
+    # --- L_rec: per-modality g_head reconstruction loss (tap A only) ---
     if lambda_rec > 0:
-        z_raw = _mean_pool_raw(audio, face, context, text_feat)
-        attr_pred = g_head(z_raw)
-        loss_rec = F.smooth_l1_loss(attr_pred, attr_tensor)
+        face_pred, voice_pred, motion_pred, text_pred = g_head(
+            face, audio, context, text_feat
+        )
+        # Split attr_tensor into per-modality targets (must match CueExtractor layout)
+        face_attrs = attr_tensor[:, :5]
+        voice_attrs = attr_tensor[:, 5:8]
+        if g_head.has_context:
+            motion_attrs = attr_tensor[:, 8:11]
+            text_attrs = attr_tensor[:, 11:15]
+        else:
+            text_attrs = attr_tensor[:, 8:12]
+
+        loss_rec = (
+            F.smooth_l1_loss(face_pred, face_attrs)
+            + F.smooth_l1_loss(voice_pred, voice_attrs)
+            + F.smooth_l1_loss(text_pred, text_attrs)
+        )
+        if g_head.has_context and motion_pred is not None:
+            loss_rec = loss_rec + F.smooth_l1_loss(motion_pred, motion_attrs)
         total_loss = total_loss + lambda_rec * loss_rec
 
     # --- L_kl: soft distillation from MLP confidence ---
+    # KL(mlp_teacher || llm_student): lm_soft=log_softmax(llm/T), mlp_soft=softmax(mlp/T)
+    # F.kl_div(log_Q, P) = KL(P||Q) — direction: MLP→LLM ✓; T² restores gradient magnitude
+    # Both distributions are 8-d (same support): mlp_soft=(B,8), lm_soft=log_softmax over 8 tokens (FIX 8.4)
     if lambda_kl > 0:
-        mlp_soft = F.softmax(logits / kl_temp, dim=-1).detach()
-        lm_logits_at_emotion = _extract_emotion_logprobs(lm_out.logits, lm_labels, tokenizer)
+        mlp_soft = F.softmax(logits / kl_temp, dim=-1).detach()  # (B, 8)
+        lm_logits_at_emotion = _extract_emotion_logprobs(lm_out.logits, lm_labels, tokenizer)  # (B, 8) restricted
         if lm_logits_at_emotion is not None:
-            lm_soft = F.log_softmax(lm_logits_at_emotion / kl_temp, dim=-1)
+            lm_soft = F.log_softmax(lm_logits_at_emotion / kl_temp, dim=-1)  # log-normalized over 8 tokens ✓
             loss_kl = F.kl_div(lm_soft, mlp_soft, reduction="batchmean") * (kl_temp ** 2)
             total_loss = total_loss + lambda_kl * loss_kl
 
     return total_loss
 
 
-def _extract_emotion_logprobs(lm_logits, labels, tokenizer):
-    """Try to extract logits at positions corresponding to emotion label tokens.
+def _build_label_token_ids(tokenizer, label_names: list) -> list:
+    """Map each emotion label to a single-token ID (hard requirement).
 
-    Returns None if extraction fails (skip L_kl in that case).
+    All label names MUST tokenize to exactly one token with the current
+    tokenizer.  A multi-token label makes the 8-class distribution ambiguous
+    (which token represents the class?), so we raise immediately rather than
+    silently approximating with the first subword.  If a label is multi-token,
+    map it to a single-token surface string before calling (e.g. rename the
+    display label or add a one-word alias).
+
+    Also raises if any two labels share the same token ID — a collision would
+    corrupt the restricted 8-d KL support.
+    """
+    ids = []
+    for name in label_names:
+        toks = tokenizer.encode(name, add_special_tokens=False)
+        if not toks:
+            raise ValueError(f"Label '{name}' produced empty token encoding")
+        if len(toks) > 1:
+            raise ValueError(
+                f"Label '{name}' encodes as {len(toks)} tokens {toks}; "
+                "all emotion labels must map to a single token for consistent "
+                "KL and hedge metrics. Rename the label to a single-token surface form."
+            )
+        ids.append(toks[0])
+    if len(set(ids)) != len(ids):
+        dupes = [(n, i) for n, i in zip(label_names, ids) if ids.count(i) > 1]
+        raise ValueError(
+            f"Duplicate first-token IDs across emotion labels: {dupes}. "
+            "KL distillation support would be inconsistent."
+        )
+    return ids
+
+
+def _extract_emotion_logprobs(lm_logits, labels, tokenizer):
+    """Extract raw logits restricted to the 8 emotion token positions.
+
+    Returns shape (B, 8) — the raw (un-normalized) logit for each of the 8
+    emotion token IDs at the last supervised position of each sequence.
+    The caller applies log_softmax over these 8 logits, which renormalizes
+    the distribution to the same 8-token support as the MLP's softmax (FIX 8.4).
+
+    Returns None if extraction fails (KL loss is silently skipped).
     """
     try:
-        label_token_ids = []
-        for name in _LABEL_NAMES:
-            ids = tokenizer.encode(name, add_special_tokens=False)
-            if ids:
-                label_token_ids.append(ids[0])
-        if len(label_token_ids) != len(_LABEL_NAMES):
-            return None
+        label_token_ids = _build_label_token_ids(tokenizer, _LABEL_NAMES)
+        n_labels = len(label_token_ids)
 
         B = lm_logits.shape[0]
         emotion_logits = []
@@ -558,9 +660,16 @@ def _extract_emotion_logprobs(lm_logits, labels, tokenizer):
             if len(valid) == 0:
                 return None
             last_pos = valid[-1].item()
-            token_logits = lm_logits[i, last_pos, label_token_ids]
+            # Restricts to exactly n_labels token IDs; log_softmax over this
+            # vector produces a valid 8-class distribution (sum-to-1) matching MLP.
+            token_logits = lm_logits[i, last_pos, label_token_ids]  # (n_labels,)
+            assert token_logits.shape == (n_labels,), (
+                f"Expected {n_labels} emotion logits, got {token_logits.shape}"
+            )
             emotion_logits.append(token_logits)
-        return torch.stack(emotion_logits)
+        result = torch.stack(emotion_logits)  # (B, n_labels)
+        assert result.shape == (B, n_labels)
+        return result
     except Exception:
         return None
 

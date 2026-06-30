@@ -49,11 +49,19 @@ def parse_args() -> argparse.Namespace:
 
 def _config_hash(cfg) -> str:
     """Compute a hash of the encoder config for cache invalidation."""
+    ctx_cfg = cfg.visual_encoder.context_encoder
+    ctx_type = getattr(ctx_cfg, "type", "vit_imagenet")
+    # Distinguish pose vs vit_imagenet; pose has no model_name
+    ctx_key = (
+        getattr(ctx_cfg, "model_name", "")
+        if ctx_type != "pose"
+        else f"pose:{getattr(ctx_cfg, 'pose_backend', 'mediapipe')}"
+    )
     relevant = {
         "audio": cfg.audio_encoder.model_name,
         "audio_tokens": cfg.audio_encoder.target_tokens,
         "face": cfg.visual_encoder.face_encoder.model_name,
-        "context": cfg.visual_encoder.context_encoder.model_name,
+        "context": ctx_key,
         "text": getattr(cfg.text_encoder, "model", getattr(cfg.text_encoder, "model_name", "unknown")),
         "text_backend": getattr(cfg.text_encoder, "backend", getattr(cfg.text_encoder, "type", "xlmr")),
     }
@@ -107,15 +115,10 @@ def main() -> int:
         )
 
     if "context" in args.modalities:
-        from vie_gameemo.encoders.context_vit import ContextEncoder
-        logger.info("Loading context encoder...")
-        encoders["context"] = ContextEncoder(
-            model_name=cfg.visual_encoder.context_encoder.model_name,
-            n_frames=cfg.visual_encoder.context_encoder.n_frames,
-            target_size=tuple(cfg.visual_encoder.context_encoder.target_size),
-            temporal_pool=cfg.visual_encoder.context_encoder.temporal_pool,
-            device=device,
-        )
+        from vie_gameemo.encoders import get_context_encoder
+        ctx_enc_type = getattr(cfg.visual_encoder.context_encoder, "type", "vit_imagenet")
+        logger.info("Loading context encoder (type=%s)...", ctx_enc_type)
+        encoders["context"] = get_context_encoder(cfg).to(device)
 
     if "text" in args.modalities:
         from vie_gameemo.encoders.text_xlmr import build_text_encoder
@@ -218,14 +221,29 @@ def main() -> int:
             # Always extract real context features regardless of strategy.
             # Zeroing for face_only is applied at Dataset load time, not here,
             # so the cache remains strategy-agnostic and can be reused across runs.
+            ctx_enc_type = getattr(cfg.visual_encoder.context_encoder, "type", "vit_imagenet")
             if strategy == "dual_path" and has_face and resolved_bbox is not None:
-                # Strategy C: full gameplay frame (non-webcam region) for game context
                 from vie_gameemo.preprocess.face_crop import batch_extract_webcam_regions
-                webcam_crops = batch_extract_webcam_regions(
-                    frame_paths, resolved_bbox,
-                    target_size=tuple(cfg.visual_encoder.context_encoder.target_size),
-                )
-                features["context"] = encoders["context"].encode(webcam_crops).squeeze(0)
+                if ctx_enc_type == "pose":
+                    # Pose branch: crop webcam WITHOUT resize (full native resolution for
+                    # better keypoint detection). Same webcam region as ViT for ablation
+                    # fairness (P0.0-fix.1). kps saved to shared cache (P0.0-fix.2).
+                    webcam_crops_raw = batch_extract_webcam_regions(
+                        frame_paths, resolved_bbox, margin=0.1, resize=False,
+                    )
+                    kps_cache_path = (
+                        Path(cfg.paths.cache) / "pose_kinematics" / f"{clip_id}_kps.npy"
+                    )
+                    features["context"] = encoders["context"].encode(
+                        webcam_crops_raw, kps_cache_path=kps_cache_path,
+                    ).squeeze(0)
+                else:
+                    # ViT branch: crop + resize to 224×224 as before
+                    webcam_crops = batch_extract_webcam_regions(
+                        frame_paths, resolved_bbox,
+                        target_size=tuple(cfg.visual_encoder.context_encoder.target_size),
+                    )
+                    features["context"] = encoders["context"].encode(webcam_crops).squeeze(0)
             else:
                 # full_frame, face_only, or dual_path fallback: full frames
                 if strategy == "dual_path":
