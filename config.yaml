@@ -127,7 +127,7 @@ annotation:
 
   # Agent: Visual description — Qwen2.5-VL (webcam region)
   qwen_vl:
-    model_name: "Qwen/Qwen2.5-VL-7B-Instruct"   # 32B/72B if A100 available
+    model_name: "Qwen/Qwen2.5-VL-32B-Instruct"
     quantization: "4bit"        # "4bit" | "8bit" | "none"
     max_new_tokens: 200
     temperature: 0.3
@@ -204,7 +204,7 @@ annotation:
 
   # Consolidator — merges all signals into final reasoning
   consolidator:
-    model_name: "Qwen/Qwen2.5-7B-Instruct"   # 32B/72B if A100 available
+    model_name: "Qwen/Qwen2.5-32B-Instruct"
     quantization: "4bit"
     max_new_tokens: 400
     temperature: 0.5
@@ -396,17 +396,18 @@ llm:
 
   # Shared base model
   base_model:
-    name: "Qwen/Qwen2.5-7B-Instruct"
-    fallback: "Qwen/Qwen2.5-1.5B-Instruct"   # if no A100
+    name: "Qwen/Qwen2.5-32B-Instruct"
+    fallback: "Qwen/Qwen2.5-7B-Instruct"
     quantization: "4bit"
     device_map: "auto"
     max_new_tokens: 300
     temperature: 0.7
 
-  # Setup 1: Explainer (no training)
-  # Input: soft token + MLP label → explains WHY (never overrides label)
-  # If no cognition checkpoint: falls back to text-only prompt
-  llm1: {}
+  # Setup 1: Explainer (trained or zero-shot)
+  # Input: soft token + MLP penult + label → explains WHY (never overrides label)
+  # If no checkpoint: falls back to zero-shot text-only prompt
+  llm1:
+    explanation_checkpoint: null  # e.g. "outputs/checkpoints/llm1_explanation_best.pt"
 
   # Setup 2: Co-Reasoner (requires cognition training)
   # Input: soft token + MLP label (hint) → own prediction (may override)
@@ -503,6 +504,32 @@ training:
       rank: 16
       alpha: 32
       target_modules: ["q_proj", "v_proj"]
+
+  # Stage LLM-1 Explanation: faithful explainer (B1-B6 from claude_code_prompt)
+  llm1_explanation:
+    epochs_a: 15            # Stage A: alignment (ModalAdapter + g_head only)
+    epochs_b: 10            # Stage B: LoRA fine-tune (optional)
+    run_stage_b: false      # Set true to run Stage B after Stage A
+    batch_size: 8
+    gradient_accumulation: 4
+    learning_rate:
+      adapter: 2.0e-4
+      g_head: 2.0e-4
+      lora: 2.0e-5
+    lora:
+      rank: 4
+      alpha: 8
+      target_modules: ["q_proj", "v_proj"]
+    loss:
+      lambda_kl: 0.1        # KL distillation from MLP confidence (0 to disable)
+      lambda_rec: 0.1        # g_head reconstruction loss (0 to disable)
+      kl_temperature: 2.0
+    g_head:
+      hidden_dim: 128
+      n_attrs: 15            # 5 face + 3 prosody + 3 visual + 4 lexicon
+    early_stopping:
+      patience: 5
+      monitor: "val_agreement"
 
 # -----------------------------------------------------------------------------
 # Evaluation

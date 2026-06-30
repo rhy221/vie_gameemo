@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import torch
 from torch.utils.data import DataLoader
 
-from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn
+from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn, zero_modalities_for_strategy
 from vie_gameemo.training.cognition import train_cognition
 from vie_gameemo.training.perception import train_perception
 from vie_gameemo.utils.config import load_config
@@ -78,17 +78,24 @@ def main() -> int:
                 args.stage, cfg.fusion.type, cfg.llm.active_setup)
 
     split_manifest = Path(getattr(cfg.paths, "split_manifest", "data/splits.json"))
+    strategy = getattr(getattr(cfg, "visual_encoder", None), "strategy", "dual_path")
+    zero_mods = zero_modalities_for_strategy(strategy)
+    if zero_mods:
+        logger.info("Strategy '%s': zeroing modalities at load time: %s", strategy, zero_mods)
+
     train_ds = VieGameEmoDataset(
         annotations_dir=Path(cfg.paths.annotations),
         features_dir=Path(cfg.paths.features),
         split="train",
         split_manifest=split_manifest if split_manifest.exists() else None,
+        zero_modalities=zero_mods,
     )
     val_ds = VieGameEmoDataset(
         annotations_dir=Path(cfg.paths.annotations),
         features_dir=Path(cfg.paths.features),
         split="val",
         split_manifest=split_manifest if split_manifest.exists() else None,
+        zero_modalities=zero_mods,
     )
     train_loader = DataLoader(
         train_ds,

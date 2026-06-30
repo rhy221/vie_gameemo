@@ -144,10 +144,12 @@ def _load_llm(cfg: SimpleNamespace):
 
     if active == "llm1":
         from vie_gameemo.llm.llm1_explainer import LLM1Explainer
+        llm1_ckpt = getattr(getattr(llm_cfg, "llm1", None), "explanation_checkpoint", None)
+        adapter_ckpt = llm1_ckpt or cognition_ckpt
         return LLM1Explainer(
             model_name=llm_cfg.base_model.name,
             quantization=llm_cfg.base_model.quantization,
-            modal_adapter_ckpt=cognition_ckpt,
+            modal_adapter_ckpt=adapter_ckpt,
         )
     elif active == "llm2":
         from vie_gameemo.llm.llm2_coreasoner import LLM2CoReasoner
@@ -268,7 +270,7 @@ def _forward(fusion, classifier, features: dict, device: torch.device) -> dict:
         fused = fusion(audio, face, context, text, has_face=has_face)
         if isinstance(fused, tuple):
             fused = fused[0]
-        logits = classifier(fused)
+        logits, penult = classifier(fused, return_penultimate=True)
         probs = torch.softmax(logits, dim=-1)[0]
 
     pred_idx = int(probs.argmax().item())
@@ -276,7 +278,8 @@ def _forward(fusion, classifier, features: dict, device: torch.device) -> dict:
         "label": _EMOTION_LABELS[pred_idx] if pred_idx < len(_EMOTION_LABELS) else str(pred_idx),
         "confidence": float(probs[pred_idx].item()),
         "class_scores": {_EMOTION_LABELS[i]: float(probs[i].item()) for i in range(len(_EMOTION_LABELS))},
-        "fusion_emb": fused.cpu(),  # (1, T, 768) — for LLM modal adapter
+        "fusion_emb": fused.cpu(),
+        "penult": penult.cpu(),
     }
 
 
@@ -303,6 +306,9 @@ def _features_to_evidence(
             "fusion_emb": fusion_emb,
             "label": prediction.get("label", "neutral"),
         }
+        penult = prediction.get("penult")
+        if penult is not None:
+            evidence["penult"] = penult
         for key in ("audio", "face", "context", "text"):
             raw = features.get(key)
             if raw is not None:

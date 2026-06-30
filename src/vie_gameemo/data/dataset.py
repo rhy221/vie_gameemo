@@ -45,12 +45,16 @@ class VieGameEmoDataset(Dataset):
         mode: str = "cached",
         label_schema: str = "gaming_8",
         split_manifest: Path | None = None,
+        zero_modalities: list[str] | None = None,
     ) -> None:
         self.annotations_dir = Path(annotations_dir)
         self.features_dir = Path(features_dir)
         self.split = split
         self.mode = mode
         self.label_schema = label_schema
+        # Modalities to zero at load time (strategy masking, not baked into cache).
+        # e.g. ['context'] for face_only, [] for dual_path/full_frame.
+        self.zero_modalities: frozenset[str] = frozenset(zero_modalities or [])
 
         annotation_files = sorted(self.annotations_dir.glob("*.json"))
         if not annotation_files:
@@ -83,6 +87,11 @@ class VieGameEmoDataset(Dataset):
                     "ann_path": ann_file,
                     "label": _LABEL_TO_IDX.get(ann.emotion_label.value, 0),
                     "has_face": ann.webcam_bbox is not None,
+                    "reasoning_text": getattr(ann, "reasoning", ""),
+                    "audio_desc": getattr(ann, "audio_tone_desc", ""),
+                    "visual_desc": getattr(ann, "face_description", ""),
+                    "transcript": getattr(ann, "transcript", ""),
+                    "source_language": getattr(ann, "source_language", "vi"),
                 })
             except Exception as exc:
                 logger.warning("Failed to load annotation %s: %s", ann_file, exc)
@@ -132,6 +141,17 @@ class VieGameEmoDataset(Dataset):
         context = _squeeze_batch(features.get("context", torch.zeros(1, 768)))
         text = _squeeze_batch(features.get("text", torch.zeros(1, 768)))
 
+        # Strategy masking: zero modalities at load time (never baked into cache).
+        if self.zero_modalities:
+            if "audio" in self.zero_modalities:
+                audio = torch.zeros_like(audio)
+            if "face" in self.zero_modalities:
+                face = torch.zeros_like(face)
+            if "context" in self.zero_modalities:
+                context = torch.zeros_like(context)
+            if "text" in self.zero_modalities:
+                text = torch.zeros_like(text)
+
         return {
             "audio": audio,
             "face": face,
@@ -140,7 +160,30 @@ class VieGameEmoDataset(Dataset):
             "label": item["label"],
             "has_face": item["has_face"],
             "clip_id": clip_id,
+            "reasoning_text": item.get("reasoning_text", ""),
+            "audio_desc": item.get("audio_desc", ""),
+            "visual_desc": item.get("visual_desc", ""),
+            "transcript": item.get("transcript", ""),
+            "source_language": item.get("source_language", "vi"),
         }
+
+
+def zero_modalities_for_strategy(strategy: str) -> list[str]:
+    """Return which modalities should be zeroed for a given visual strategy.
+
+    This is the single source of truth for strategy → modality masking.
+
+    Strategy semantics:
+      dual_path  — face crop + full-frame context, all 4 real.
+      face_only  — no context encoder; context zeroed at load time.
+      full_frame — both face and context use full-frame encoding (no webcam
+                   crop); both tensors are real, nothing zeroed.
+    """
+    return {
+        "face_only": ["context"],
+        "dual_path": [],
+        "full_frame": [],
+    }.get(strategy, [])
 
 
 def make_splits(

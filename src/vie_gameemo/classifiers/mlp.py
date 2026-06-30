@@ -38,14 +38,18 @@ class EmotionClassifier(nn.Module):
             nn.Linear(hidden_dim, n_classes),
         )
 
-    def forward(self, u_fusion: Tensor) -> Tensor:
+    def forward(
+        self, u_fusion: Tensor, return_penultimate: bool = False,
+    ) -> Tensor | tuple[Tensor, Tensor]:
         """Classify a fused representation.
 
         Args:
             u_fusion: (B, T, d_model) from Stage 3 fusion, or (B, d_model) already pooled.
+            return_penultimate: If True, also return the 256-d hidden vector
+                before the final classification layer (for LLM-1 faithfulness tap).
 
         Returns:
-            Logits of shape (B, n_classes).
+            Logits (B, n_classes), or (logits, penult) if return_penultimate.
         """
         if u_fusion.dim() == 3:
             if self.pool == "mean":
@@ -59,4 +63,8 @@ class EmotionClassifier(nn.Module):
         else:
             h = u_fusion  # already (B, D)
 
-        return self.net(h)
+        penult = self.net[:3](h)
+        logits = self.net[3](penult)
+        if return_penultimate:
+            return logits, penult
+        return logits
