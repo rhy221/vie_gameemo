@@ -50,6 +50,12 @@ class _MediaPipeBackend:
     def _get_holistic(self):
         if self._holistic is None:
             import mediapipe as mp
+            if not hasattr(mp, "solutions") or not hasattr(mp.solutions, "holistic"):
+                raise RuntimeError(
+                    "MediaPipe 'solutions.holistic' not found — it was removed in mediapipe>=0.10.14.\n"
+                    "Fix: pip install 'mediapipe<0.10.14'\n"
+                    "Or use pose_backend: 'mmpose' in config.yaml (requires mmpose installation)."
+                )
             self._holistic = mp.solutions.holistic.Holistic(
                 static_image_mode=False,
                 model_complexity=1,
@@ -116,15 +122,16 @@ class _MMPoseBackend:
 
     _UPPER_BODY_COCO_IDX = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]  # 13 kpts
 
-    def __init__(self) -> None:
+    def __init__(self, device: str = "cpu") -> None:
         self._inferencer = None
+        self._device = device
 
     def _get_inferencer(self):
         if self._inferencer is None:
             from mmpose.apis import MMPoseInferencer
             self._inferencer = MMPoseInferencer(
                 pose2d="rtmpose-s_8xb256-420e_coco-256x192",
-                device="cpu",
+                device=self._device,
             )
         return self._inferencer
 
@@ -299,7 +306,7 @@ class PoseContextEncoder(nn.Module):
             n_hand_kpts = 42                              # 21 * 2 hands
             K = n_pose_kpts + n_hand_kpts               # 51
         elif backend == "mmpose":
-            self._backend = _MMPoseBackend()
+            self._backend = _MMPoseBackend(device="cpu")  # device synced in encode() after .to()
             K = len(_MMPoseBackend._UPPER_BODY_COCO_IDX)  # 13
         else:
             raise ValueError(f"Unknown pose backend: {backend!r}. Use 'mediapipe' or 'mmpose'.")
@@ -335,6 +342,14 @@ class PoseContextEncoder(nn.Module):
 
         if not webcam_crops:
             return torch.zeros(1, 1, self.d_out, device=device)
+
+        # Sync MMPose backend to the module's current device (set after .to(device) call).
+        # If device changed since init, reset the inferencer so it re-creates on correct device.
+        if hasattr(self._backend, "_device"):
+            dev_str = str(device)
+            if self._backend._device != dev_str:
+                self._backend._device = dev_str
+                self._backend._inferencer = None  # force lazy re-init on new device
 
         sampled = _uniform_sample(webcam_crops, self.n_frames)
         kps = self._backend.extract_keypoints(sampled)   # (T, K, 4)
