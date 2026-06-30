@@ -49,6 +49,9 @@ paths:
   outputs: "outputs"
   checkpoints: "outputs/checkpoints"
   results: "outputs/results"
+  # Per context_encoder branch checkpoints (set after retraining each branch)
+  checkpoint_vit_imagenet: null   # e.g. "outputs/checkpoints/perception_vit_imagenet_best.pt"
+  checkpoint_pose: null           # e.g. "outputs/checkpoints/perception_pose_best.pt"
 
 # -----------------------------------------------------------------------------
 # STAGE 0: Data Curation & Annotation
@@ -300,11 +303,28 @@ visual_encoder:
         pool_method: "attention" # "mean" | "max" | "attention" | "video_native"
 
   # Path 2: context encoder (webcam region — body language, posture, background)
+  # Set type to "pose" to switch to pose-kinematics branch; keep "vit_imagenet" for ablation.
   context_encoder:
+    type: "vit_imagenet"          # "vit_imagenet" | "pose"
+
+    # --- vit_imagenet branch (baseline/ablation) ---
     model_name: "google/vit-base-patch16-224"   # ImageNet pretrain
     n_frames: 16
     target_size: [224, 224]
     temporal_pool: "mean"
+
+    # --- pose branch (new) ---
+    pose_backend: "mediapipe"     # "mediapipe" | "mmpose"
+    pose_keypoints: "upper_body"  # upper_body + hands + head landmarks only
+    # TODO (P0.3): calibrate n_frames_pose independently — pose may benefit from
+    # denser sampling (e.g. 32) to catch sub-second impulse events like desk-slaps.
+    n_frames_pose: 16             # separate from ViT n_frames (P0.0-fix.6)
+    pose_confidence_as_feature: true   # keep low-confidence keypoints as signal (P0.2)
+    pose_temporal:
+      type: "bigru"
+      hidden_dim: 128             # BiGRU hidden_size; output dim = hidden_dim*2 → Linear → 768
+      n_layers: 1
+      dropout: 0.3
 
 # -----------------------------------------------------------------------------
 # STAGE 2c: Text Encoder
@@ -526,15 +546,34 @@ training:
       kl_temperature: 2.0
     g_head:
       hidden_dim: 128
-      n_attrs: 15            # 5 face + 3 prosody + 3 visual + 4 lexicon
+      # n_attrs is dynamic per context_encoder.type:
+      #   pose:        15 = face(5) + voice(3) + motion(3) + text(4)
+      #   vit_imagenet: 12 = face(5) + voice(3) + text(4)  — no context head
+      n_attrs_pose: 15
+      n_attrs_vit_imagenet: 12
     early_stopping:
       patience: 5
       monitor: "val_agreement"
 
 # -----------------------------------------------------------------------------
+# Cue extraction thresholds (used by CueExtractor; can be overridden per experiment)
+# -----------------------------------------------------------------------------
+cues:
+  # TODO (P0.3): calibrate these thresholds using percentiles from actual training data.
+  # Current values are initial estimates — run scripts/calibrate_cue_bins.py after
+  # precomputing pose kinematics on the full dataset.
+  motion_energy_bins: [[0.02, "low"], [0.08, "moderate"]]   # upper-bound per label (last = high)
+  impact_bins:        [[0.05, "none"], [0.15, "moderate"]]   # last = strong
+  periodicity_bins:   [[0.20, "none"], [0.50, "weak"]]       # last = rhythmic
+  impact_conf_threshold: 0.3   # min wrist confidence across 3-frame acc window to count as valid impact
+
+# -----------------------------------------------------------------------------
 # Evaluation
 # -----------------------------------------------------------------------------
 evaluation:
+  faithfulness:
+    hedge_threshold: 0.6   # LLM emotion-token prob < threshold → considered "hedged"
+    n_samples: 200
   metrics:
     - "accuracy"
     - "weighted_f1"

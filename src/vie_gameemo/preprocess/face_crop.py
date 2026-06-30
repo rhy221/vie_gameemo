@@ -105,17 +105,20 @@ def extract_webcam_region(
     webcam_bbox: WebcamBBox,
     target_size: tuple[int, int] = (224, 224),
     margin: float = 0.1,
+    resize: bool = True,
 ) -> np.ndarray:
     """Crop the webcam region (wider than face crop, no tight crop).
 
     Args:
         frame: Input frame as BGR ndarray (HxWx3).
         webcam_bbox: Detected webcam region (normalized coords).
-        target_size: (width, height) for output.
+        target_size: (width, height) for output when resize=True.
         margin: Small margin to avoid cutting off edges.
+        resize: If True (default), resize crop to target_size. Set False for
+            pose branch — pose detection needs full native resolution, not 224×224.
 
     Returns:
-        Cropped + resized webcam region as BGR ndarray.
+        Cropped (and optionally resized) webcam region as BGR ndarray.
     """
     if frame is None or frame.size == 0:
         return np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
@@ -134,7 +137,9 @@ def extract_webcam_region(
         return np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
 
     cropped = frame[y1:y2, x1:x2]
-    return cv2.resize(cropped, target_size, interpolation=cv2.INTER_LINEAR)
+    if resize:
+        return cv2.resize(cropped, target_size, interpolation=cv2.INTER_LINEAR)
+    return cropped
 
 
 def batch_extract_webcam_regions(
@@ -142,14 +147,17 @@ def batch_extract_webcam_regions(
     webcam_bbox: WebcamBBox | list[WebcamBBox | None],
     target_size: tuple[int, int] = (224, 224),
     margin: float = 0.1,
+    resize: bool = True,
 ) -> list[np.ndarray]:
     """Batch webcam region extraction for context encoder.
 
     Args:
         frame_paths: Paths to extracted frames (JPG).
         webcam_bbox: Single bbox (same for all frames) or per-frame list.
-        target_size: Output size (width, height).
+        target_size: Output size (width, height) when resize=True.
         margin: Margin expansion.
+        resize: If True (default), resize each crop to target_size. Pass False
+            for the pose branch to preserve native resolution.
 
     Returns:
         List of BGR ndarrays, one per frame.
@@ -166,7 +174,7 @@ def batch_extract_webcam_regions(
         if bbox is None:
             crops.append(np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8))
             continue
-        crops.append(extract_webcam_region(frame, bbox, target_size, margin))
+        crops.append(extract_webcam_region(frame, bbox, target_size, margin, resize))
     return crops
 
 
