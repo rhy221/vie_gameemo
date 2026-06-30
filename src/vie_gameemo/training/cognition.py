@@ -70,6 +70,29 @@ _LLM_PERCEPTION_PROMPT_WITH_HINT = (
     "Trả lời theo format: <answer>[nhãn]</answer>"
 )
 
+# --- Multi-task prompts for cognition training ---
+
+_TASK_AUDIO_PROMPT = (
+    "Dựa trên đặc trưng âm thanh của clip game livestream, hãy phân tích "
+    "giọng nói và âm thanh của streamer. Mô tả ngữ điệu, tốc độ nói, "
+    "cường độ, và các đặc điểm cảm xúc trong giọng nói."
+)
+
+_TASK_VISUAL_PROMPT = (
+    "Dựa trên đặc trưng hình ảnh của clip game livestream, hãy mô tả "
+    "biểu cảm khuôn mặt, cử chỉ, và ngôn ngữ cơ thể của streamer."
+)
+
+_TASK_REASONING_PROMPT = (
+    "Dựa trên đặc trưng đa phương thức của clip game livestream, "
+    "streamer đang ở trạng thái {label}.\n"
+    "Hãy giải thích vì sao, liên kết bằng chứng từ nhiều modality.\n"
+    "Trả lời theo format:\n"
+    "<think>[lý luận]</think>\n<answer>{label}</answer>"
+)
+
+_COGNITION_TASKS = ["emotion", "audio", "visual", "reasoning"]
+
 
 def train_llm_perception(
     cfg: SimpleNamespace,
@@ -639,41 +662,104 @@ def train_cognition(
 
             cls_loss = cls_criterion(cls_logits, gt_labels)
 
-            # Language modeling loss: soft token (from modal adapter) + reasoning text
-            lm_loss = torch.tensor(0.0, device=device)
-            reasoning_texts = batch.get("reasoning_text")
-            if reasoning_texts:
-                B = fused.shape[0]
-                soft_tokens, soft_mask = llm_adapter(
-                    fused, audio=audio, face=face, context=context,
-                    text=text, has_face=has_face,
-                )
-                n_soft = soft_tokens.shape[1]
+            # Multi-task LM loss: random task per sample (like v2)
+            B = fused.shape[0]
+            import random as _rnd
 
-                inputs = tokenizer(
-                    list(reasoning_texts),
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=255,
-                    padding=True,
-                ).to(device)
+            task_prompts = []
+            task_targets = []
+            task_audio = audio.clone()
+            task_face = face.clone()
+            task_context = context.clone()
+            task_text = text.clone()
 
-                embed_fn = llm.get_input_embeddings()
-                text_embeds = embed_fn(inputs["input_ids"])
+            for i in range(B):
+                gt_name = _LABEL_NAMES[gt_labels[i].item()]
+                task = _rnd.choice(_COGNITION_TASKS)
 
-                inputs_embeds = torch.cat([soft_tokens, text_embeds], dim=1)
-                attn_mask = torch.cat([soft_mask, inputs["attention_mask"]], dim=1)
-                lm_labels = torch.cat([
-                    torch.full((B, n_soft), -100, device=device, dtype=torch.long),
-                    inputs["input_ids"],
-                ], dim=1)
+                if task == "audio":
+                    audio_desc = batch.get("audio_desc", [""] * B)
+                    desc = audio_desc[i] if isinstance(audio_desc, (list, tuple)) else ""
+                    if not desc:
+                        task = "emotion"
+                    else:
+                        task_prompts.append(_TASK_AUDIO_PROMPT)
+                        task_targets.append(desc)
+                        task_face[i] = 0
+                        task_context[i] = 0
+                        task_text[i] = 0
+                        continue
 
-                lm_out = llm(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attn_mask,
-                    labels=lm_labels,
-                )
-                lm_loss = lm_out.loss
+                if task == "visual":
+                    visual_desc = batch.get("visual_desc", [""] * B)
+                    desc = visual_desc[i] if isinstance(visual_desc, (list, tuple)) else ""
+                    if not desc:
+                        task = "emotion"
+                    else:
+                        task_prompts.append(_TASK_VISUAL_PROMPT)
+                        task_targets.append(desc)
+                        task_audio[i] = 0
+                        task_text[i] = 0
+                        continue
+
+                if task == "reasoning":
+                    reasoning = batch.get("reasoning_text", [""] * B)
+                    r = reasoning[i] if isinstance(reasoning, (list, tuple)) else ""
+                    if not r:
+                        task = "emotion"
+                    else:
+                        task_prompts.append(_TASK_REASONING_PROMPT.format(label=gt_name))
+                        task_targets.append(r)
+                        continue
+
+                # Default: emotion label prediction
+                labels_str = ", ".join(_LABEL_NAMES)
+                task_prompts.append(_LLM_PERCEPTION_PROMPT.format(labels=labels_str))
+                task_targets.append(f"<answer>{gt_name}</answer>")
+
+            # Re-fuse with task-specific zeroed modalities
+            with torch.no_grad():
+                task_fused = fusion(task_audio, task_face, task_context, task_text, has_face=has_face)
+                if isinstance(task_fused, tuple):
+                    task_fused = task_fused[0]
+
+            soft_tokens, soft_mask = llm_adapter(
+                task_fused, audio=task_audio, face=task_face, context=task_context,
+                text=task_text, has_face=has_face,
+            )
+            n_soft = soft_tokens.shape[1]
+
+            full_texts = [p + "\n" + t for p, t in zip(task_prompts, task_targets)]
+            prompt_only = tokenizer(
+                task_prompts, return_tensors="pt", padding=True,
+                truncation=True, max_length=256,
+            ).to(device)
+            full = tokenizer(
+                full_texts, return_tensors="pt", padding=True,
+                truncation=True, max_length=512,
+            ).to(device)
+
+            embed_fn = llm.get_input_embeddings()
+            full_embeds = embed_fn(full["input_ids"])
+
+            inputs_embeds = torch.cat([soft_tokens, full_embeds], dim=1)
+            attn_mask = torch.cat([soft_mask, full["attention_mask"]], dim=1)
+
+            lm_labels = full["input_ids"].clone()
+            for i in range(B):
+                prompt_len = prompt_only["attention_mask"][i].sum().item()
+                lm_labels[i, :prompt_len] = -100
+            lm_labels = torch.cat([
+                torch.full((B, n_soft), -100, device=device, dtype=torch.long),
+                lm_labels,
+            ], dim=1)
+
+            lm_out = llm(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attn_mask,
+                labels=lm_labels,
+            )
+            lm_loss = lm_out.loss
 
             total_loss = alpha * cls_loss + beta * lm_loss
             total_loss.backward()

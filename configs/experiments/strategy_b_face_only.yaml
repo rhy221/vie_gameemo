@@ -1,11 +1,10 @@
 # Experiment: Strategy B (Face crop only, no context path)
+# context tensor is zeroed in extract_features.py (strategy: face_only).
+# Fusion still receives 4 tensors; attention branch learns to weight
+# the zeroed context near 0. n_modalities stays 4.
 
 visual_encoder:
   strategy: "face_only"
-
-# 3 modalities: audio + face + text
-fusion:
-  n_modalities: 3
 
 wandb:
   tags: ["ablation_strategy_b", "face_only"]

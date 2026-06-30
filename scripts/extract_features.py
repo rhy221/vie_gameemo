@@ -215,12 +215,11 @@ def main() -> int:
                 features["face"] = feat.squeeze(0)
 
         if "context" in encoders:
-            if strategy == "face_only":
-                # Strategy B: no context, fill zeros
-                T = 1 if cfg.visual_encoder.context_encoder.temporal_pool == "mean" else cfg.visual_encoder.context_encoder.n_frames
-                features["context"] = torch.zeros(T, 768)
-            elif strategy == "dual_path" and has_face and resolved_bbox is not None:
-                # Strategy C: webcam region crops for context
+            # Always extract real context features regardless of strategy.
+            # Zeroing for face_only is applied at Dataset load time, not here,
+            # so the cache remains strategy-agnostic and can be reused across runs.
+            if strategy == "dual_path" and has_face and resolved_bbox is not None:
+                # Strategy C: full gameplay frame (non-webcam region) for game context
                 from vie_gameemo.preprocess.face_crop import batch_extract_webcam_regions
                 webcam_crops = batch_extract_webcam_regions(
                     frame_paths, resolved_bbox,
@@ -228,7 +227,7 @@ def main() -> int:
                 )
                 features["context"] = encoders["context"].encode(webcam_crops).squeeze(0)
             else:
-                # full_frame OR dual_path fallback: full frames
+                # full_frame, face_only, or dual_path fallback: full frames
                 if strategy == "dual_path":
                     logger.warning("Webcam not detected for %s — context encoder fallback to full frames", clip_id)
                 features["context"] = encoders["context"].encode_from_paths(frame_paths).squeeze(0)

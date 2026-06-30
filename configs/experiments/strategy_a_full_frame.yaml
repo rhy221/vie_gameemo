@@ -1,16 +1,14 @@
 # Experiment: Strategy A (Full-frame, paper baseline)
 # Used for ablation comparing visual encoding strategies.
 # Merge with main config.yaml; this file overrides specific fields.
+# face and context both use full-frame encoding (no webcam crop).
+# n_modalities stays 4 — conv_attention.py forward always concatenates
+# all 4 tensors regardless.
 
 visual_encoder:
   strategy: "full_frame"
-  # Disable webcam detection for full-frame mode
   webcam_detector:
     enabled: false
-
-# Fusion now sees 3 modalities (audio + visual_unified + text), not 4
-fusion:
-  n_modalities: 3
 
 wandb:
   tags: ["ablation_strategy_a", "full_frame", "paper_baseline"]
