@@ -289,6 +289,9 @@ def train_llm1_stage_a(
     logger.info("LLM-1 Stage A: %d epochs, λ_kl=%.2f, λ_rec=%.2f", n_epochs, lambda_kl, lambda_rec)
     best_metric = float("-inf")
 
+    n_steps_per_epoch = len(train_loader)
+    log_every = max(1, n_steps_per_epoch // 10)
+
     for epoch in range(n_epochs):
         adapter.train()
         g_head.train()
@@ -311,6 +314,13 @@ def train_llm1_stage_a(
                 optimizer.step()
                 optimizer.zero_grad()
                 scheduler.step()
+
+            if (step + 1) % log_every == 0 or (step + 1) == n_steps_per_epoch:
+                avg_so_far = epoch_loss / (step + 1)
+                logger.info(
+                    "  [A] Epoch %d/%d | step %d/%d | loss=%.4f",
+                    epoch + 1, n_epochs, step + 1, n_steps_per_epoch, avg_so_far,
+                )
 
         avg_loss = epoch_loss / max(1, len(train_loader))
         metrics = _eval_agreement(
@@ -463,6 +473,9 @@ def train_llm1_stage_b(
 
     logger.info("LLM-1 Stage B: %d epochs, LoRA rank=%d", n_epochs, lora_cfg.rank)
 
+    n_steps_per_epoch = len(train_loader)
+    log_every = max(1, n_steps_per_epoch // 10)
+
     for epoch in range(n_epochs):
         adapter.train()
         g_head.train()
@@ -485,6 +498,13 @@ def train_llm1_stage_b(
                 optimizer.step()
                 optimizer.zero_grad()
                 scheduler.step()
+
+            if (step + 1) % log_every == 0 or (step + 1) == n_steps_per_epoch:
+                avg_so_far = epoch_loss / (step + 1)
+                logger.info(
+                    "  [B] Epoch %d/%d | step %d/%d | loss=%.4f",
+                    epoch + 1, n_epochs, step + 1, n_steps_per_epoch, avg_so_far,
+                )
 
         avg_loss = epoch_loss / max(1, len(train_loader))
         metrics = _eval_agreement(
@@ -766,11 +786,14 @@ def _eval_agreement(
                 text_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
                 text_embeds = llm.get_input_embeddings()(text_ids)
                 inputs_embeds = torch.cat([soft_tokens[i:i+1].to(text_embeds.dtype), text_embeds], dim=1)
+                attn_mask = torch.ones(1, inputs_embeds.shape[1], dtype=torch.long, device=device)
 
                 out_ids = llm.generate(
                     inputs_embeds=inputs_embeds,
+                    attention_mask=attn_mask,
                     max_new_tokens=150,
                     do_sample=False,
+                    repetition_penalty=1.0,
                     pad_token_id=tokenizer.eos_token_id,
                 )
                 raw = tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
