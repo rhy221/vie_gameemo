@@ -294,13 +294,13 @@ visual_encoder:
     model_name: "trpakov/vit-face-expression"   # ViT-FER, pretrain AffectNet
     crop_margin: 0.2             # 20% expand around detected face
     target_size: [224, 224]
-    dual_view:
+    tri_view:
       global:
         source: "middle_frame"   # heuristic: peak emotion often mid-clip
       temporal:
         n_frames: 16             # sweet spot per spec ablation
-        spatial_pool: [2, 2]     # 2x2 → 64 tokens/frame
-        pool_method: "attention" # "mean" | "max" | "attention" | "video_native"
+        spatial_pool: [4, 4]     # 4x4 → 16 patch tokens from peak frame
+        pool_method: "attention" # "mean" | "max" | "attention"
 
   # Path 2: context encoder (webcam region — body language, posture, background)
   # Set type to "pose" to switch to pose-kinematics branch; keep "vit_imagenet" for ablation.
@@ -311,7 +311,9 @@ visual_encoder:
     model_name: "google/vit-base-patch16-224"   # ImageNet pretrain
     n_frames: 16
     target_size: [224, 224]
-    temporal_pool: "mean"
+    spatial_pool: [2, 2]     # 2x2 → 4 patch tokens from peak frame
+    pool_method: "mean"      # "mean" | "max" | "attention"
+    # temporal_pool is deprecated: tri-view always keeps per-frame CLS tokens
 
     # --- pose branch (new) ---
     pose_backend: "mediapipe"     # "mediapipe" | "mmpose"
