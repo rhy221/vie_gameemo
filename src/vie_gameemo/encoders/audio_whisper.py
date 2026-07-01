@@ -100,7 +100,8 @@ class WhisperAudioEncoder(nn.Module):
             sampling_rate=self.sample_rate,
             return_tensors="pt",
         )
-        input_features = inputs.input_features.to(self.device)
+        model_dtype = next(self.encoder.parameters()).dtype
+        input_features = inputs.input_features.to(self.device, dtype=model_dtype)
 
         hidden = self.encoder(input_features).last_hidden_state
 
