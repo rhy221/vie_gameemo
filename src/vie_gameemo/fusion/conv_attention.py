@@ -145,6 +145,13 @@ class ConvAttention4M(nn.Module):
         align_to: Which modality's sequence length to use as target.
             One of: 'audio', 'face', 'context', 'text', or an int.
         return_attention: If True, forward returns (u_fusion, attn_weights).
+        text_dim: Raw text-encoder output dim. Defaults to d_model. Set to
+            1024 for XLM-R-large / CafeBERT, whose hidden size differs from the
+            768-dim audio/visual encoders. The per-modality MLP projects it
+            back to d_model so all modalities share the fused channel dim.
+        audio_dim: Raw audio-encoder output dim (defaults to d_model).
+        face_dim: Raw face-encoder output dim (defaults to d_model).
+        context_dim: Raw context-encoder output dim (defaults to d_model).
     """
 
     def __init__(
@@ -156,6 +163,10 @@ class ConvAttention4M(nn.Module):
         kernel_size: int = 3,
         align_to: str = "audio",
         return_attention: bool = True,
+        text_dim: int | None = None,
+        audio_dim: int | None = None,
+        face_dim: int | None = None,
+        context_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.d_model = d_model

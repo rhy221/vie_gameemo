@@ -51,7 +51,7 @@ def train_perception(
         Path to best checkpoint.
     """
     from vie_gameemo.classifiers.mlp import EmotionClassifier
-    from vie_gameemo.fusion import get_fusion
+    from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.losses import FocalLoss, make_class_weights
 
     pcfg = cfg.training.perception
@@ -68,6 +68,7 @@ def train_perception(
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
+        **modality_dim_kwargs(fcfg),
     ).to(device)
 
     classifier = EmotionClassifier(
@@ -395,3 +396,27 @@ def load_checkpoint(
         global_step=ckpt.get("global_step", 0),
         best_metric=ckpt.get("best_metric", float("-inf")),
     )
+
+
+def infer_fusion_dims_from_checkpoint(path: Path, d_model: int) -> dict[str, int]:
+    """Recover per-modality encoder dims from a saved fusion checkpoint.
+
+    The Conv-Attention fusion's per-modality MLPs (``mlp_{audio,face,context,
+    text}.weight``) have shape ``(d_model, modality_dim)``, so reading back
+    ``shape[1]`` tells us the dim the checkpoint was trained with. This lets
+    eval rebuild the exact architecture independent of config drift (e.g. a
+    checkpoint trained with text_dim=1024 for XLM-R-large/CafeBERT evaluated
+    against a config that forgot to set it).
+
+    Returns only dims that differ from ``d_model`` — the standard 768-dim
+    modalities need no override, and emitting them would break baseline
+    fusions that don't accept ``*_dim`` kwargs.
+    """
+    ckpt = torch.load(path, map_location="cpu")
+    sd = ckpt.get("fusion_state_dict", {})
+    dims: dict[str, int] = {}
+    for mod in ("audio", "face", "context", "text"):
+        w = sd.get(f"mlp_{mod}.weight")
+        if w is not None and w.shape[1] != d_model:
+            dims[f"{mod}_dim"] = int(w.shape[1])
+    return dims

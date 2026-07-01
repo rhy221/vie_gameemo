@@ -44,7 +44,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="Process only first N clips")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing cache")
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument(
+        "--videos-dir", type=Path, default=None,
+        help="Source videos dir (default: cfg.paths.raw_videos). Used as audio "
+             "fallback: if a clip's .wav is missing, audio is read straight from "
+             "the source .mp4 (librosa decodes it via ffmpeg).",
+    )
     return parser.parse_args()
+
+
+def _index_videos(videos_dir: Path) -> dict[str, Path]:
+    """Map clip_id (stem) → source video path, searching recursively.
+
+    Videos may be nested under split/label subfolders
+    (raw_videos/<split>/<label>/<clip_id>.mp4).
+    """
+    index: dict[str, Path] = {}
+    if not videos_dir.exists():
+        return index
+    for ext in ("*.mp4", "*.mkv", "*.webm", "*.avi", "*.mov"):
+        for vp in videos_dir.glob(f"**/{ext}"):
+            index.setdefault(vp.stem, vp)
+    return index
 
 
 def _config_hash(cfg) -> str:
@@ -94,6 +115,7 @@ def main() -> int:
     # Load encoders lazily per modality
     encoders: dict = {}
 
+    video_index: dict[str, Path] = {}
     if "audio" in args.modalities:
         from vie_gameemo.encoders.audio_whisper import WhisperAudioEncoder
         logger.info("Loading audio encoder...")
@@ -103,6 +125,10 @@ def main() -> int:
             sample_rate=cfg.preprocess.audio.sample_rate,
             device=device,
         )
+        videos_dir = args.videos_dir or Path(cfg.paths.raw_videos)
+        video_index = _index_videos(videos_dir)
+        logger.info("Indexed %d source videos for audio fallback (%s)",
+                    len(video_index), videos_dir)
 
     if "face" in args.modalities:
         from vie_gameemo.encoders.face_vit import FaceEncoder
@@ -180,10 +206,14 @@ def main() -> int:
 
         if "audio" in encoders:
             audio_path = Path(cfg.paths.audios) / f"{clip_id}.wav"
-            if audio_path.exists():
-                features["audio"] = encoders["audio"].encode(audio_path).squeeze(0)
+            # Prefer a pre-extracted wav; otherwise decode audio straight from
+            # the source video (librosa reads .mp4 via ffmpeg). The dataset
+            # ships only .mp4 clips, so this fallback is the normal path.
+            source = audio_path if audio_path.exists() else video_index.get(clip_id)
+            if source is not None:
+                features["audio"] = encoders["audio"].encode(source).squeeze(0)
             else:
-                logger.warning("Audio file missing: %s", audio_path)
+                logger.warning("No audio source (wav or video) for: %s", clip_id)
                 features["audio"] = torch.zeros(cfg.audio_encoder.target_tokens, 768)
 
         import cv2
