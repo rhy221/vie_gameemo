@@ -38,6 +38,7 @@ class FaceEncoder(nn.Module):
         model_name: str = "trpakov/vit-face-expression",
         n_temporal_frames: int = 16,
         spatial_pool: tuple[int, int] = (4, 4),
+        pool_method: str = "mean",
         target_size: tuple[int, int] = (224, 224),
         device: str | torch.device = "cuda",
     ) -> None:
@@ -46,7 +47,10 @@ class FaceEncoder(nn.Module):
         Args:
             model_name: HF model ID (ViT-FER pretrained on AffectNet).
             n_temporal_frames: Frames sampled for temporal view.
-            spatial_pool: (H, W) pooling on peak frame patch grid.
+            spatial_pool: (H, W) pooling grid on peak frame patches.
+            pool_method: How to pool patches: 'mean' | 'max' | 'attention'.
+                'attention' weights patches by similarity to the CLS token
+                before spatial pooling, highlighting emotion-salient regions.
             target_size: Input frame resize target (W, H).
             device: Torch device.
         """
@@ -54,6 +58,7 @@ class FaceEncoder(nn.Module):
         self.model_name = model_name
         self.n_temporal_frames = n_temporal_frames
         self.spatial_pool = spatial_pool
+        self.pool_method = pool_method
         self.target_size = target_size
         self.device = torch.device(device)
 
@@ -100,9 +105,9 @@ class FaceEncoder(nn.Module):
         mid_idx = len(frames_pil) // 2
         peak_cls, peak_patches = self._encode_full_frame(frames_pil[mid_idx])
 
-        # Spatial pool patch tokens for detail
+        # Spatial pool patch tokens — method determined by self.pool_method
         pooled_patches = self._spatial_pool_patches(
-            peak_patches, self.spatial_pool[0], self.spatial_pool[1],
+            peak_patches, peak_cls, self.spatial_pool[0], self.spatial_pool[1],
         )  # (1, n_patch, 768)
 
         # Temporal view: n_temporal_frames uniformly sampled
@@ -160,26 +165,58 @@ class FaceEncoder(nn.Module):
         hidden = outputs.last_hidden_state  # (1, 1+N_patches, 768)
         return hidden[:, 0, :], hidden[:, 1:, :]  # CLS, patches
 
-    @staticmethod
     def _spatial_pool_patches(
+        self,
         patches: Tensor,
+        cls_token: Tensor,
         pool_h: int,
         pool_w: int,
     ) -> Tensor:
-        """Spatial average pool over ViT patch tokens.
+        """Spatial pool ViT patch tokens to (B, pool_h*pool_w, D).
 
         Args:
             patches: Patch tokens (B, N_patches, D) excluding CLS.
+            cls_token: CLS token (B, D) — used only for pool_method='attention'.
             pool_h: Target pool grid height.
             pool_w: Target pool grid width.
 
         Returns:
             Pooled tokens of shape (B, pool_h * pool_w, D).
+
+        pool_method behaviour:
+            'mean'      — standard adaptive average pool over the patch grid.
+            'max'       — adaptive max pool over the patch grid.
+            'attention' — weight each patch by its dot-product similarity with the
+                          CLS token before average pooling, surfacing emotion-salient
+                          spatial regions without any extra learnable parameters.
         """
         B, N, D = patches.shape
         grid = int(N ** 0.5)
-        patches_grid = patches.view(B, grid, grid, D).permute(0, 3, 1, 2)  # (B, D, H, W)
-        pooled = nn.functional.adaptive_avg_pool2d(patches_grid, (pool_h, pool_w))
+
+        if self.pool_method == "attention":
+            # CLS-guided weighting: attn[b, n] = softmax(CLS_b · patch_bn / sqrt(D))
+            scale = D ** 0.5
+            q = cls_token.unsqueeze(1)  # (B, 1, D)
+            attn = torch.softmax(
+                (q @ patches.transpose(1, 2)).squeeze(1) / scale, dim=-1,
+            )  # (B, N)
+            patches = patches * attn.unsqueeze(-1)  # (B, N, D) weighted
+            # Fall through to mean pool on the weighted patches
+            pooled = nn.functional.adaptive_avg_pool2d(
+                patches.view(B, grid, grid, D).permute(0, 3, 1, 2),
+                (pool_h, pool_w),
+            )
+        elif self.pool_method == "max":
+            pooled = nn.functional.adaptive_max_pool2d(
+                patches.view(B, grid, grid, D).permute(0, 3, 1, 2),
+                (pool_h, pool_w),
+            )
+        else:  # "mean" (default)
+            pooled = nn.functional.adaptive_avg_pool2d(
+                patches.view(B, grid, grid, D).permute(0, 3, 1, 2),
+                (pool_h, pool_w),
+            )
+
         return pooled.permute(0, 2, 3, 1).reshape(B, pool_h * pool_w, D)
 
 
