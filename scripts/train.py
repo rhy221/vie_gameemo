@@ -60,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         "--fusion", type=str, default=None,
         help="Override fusion type (for ablation)",
     )
+    parser.add_argument(
+        "--ablate", nargs="*", choices=["audio", "face", "context", "text"],
+        default=None, metavar="MODALITY",
+        help="Zero one or more modalities for ablation, e.g. --ablate audio face. "
+             "Overrides the strategy-derived zero_modalities from config.",
+    )
     return parser.parse_args()
 
 
@@ -79,9 +85,13 @@ def main() -> int:
 
     split_manifest = Path(getattr(cfg.paths, "split_manifest", "data/splits.json"))
     strategy = getattr(getattr(cfg, "visual_encoder", None), "strategy", "dual_path")
-    zero_mods = zero_modalities_for_strategy(strategy)
-    if zero_mods:
-        logger.info("Strategy '%s': zeroing modalities at load time: %s", strategy, zero_mods)
+    if args.ablate is not None:
+        zero_mods = args.ablate
+        logger.info("Ablation override: zeroing modalities %s", zero_mods)
+    else:
+        zero_mods = zero_modalities_for_strategy(strategy)
+        if zero_mods:
+            logger.info("Strategy '%s': zeroing modalities at load time: %s", strategy, zero_mods)
 
     train_ds = VieGameEmoDataset(
         annotations_dir=Path(cfg.paths.annotations),
