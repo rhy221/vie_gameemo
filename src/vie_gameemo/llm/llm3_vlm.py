@@ -128,7 +128,6 @@ class LLM3PureReasoner(BaseLLMReasoner):
                 audio=evidence.get("audio_emb"),
                 face=evidence.get("face_emb"),
                 context=evidence.get("context_emb"),
-                text=evidence.get("text_emb"),
                 has_face=evidence.get("has_face"),
             )
 

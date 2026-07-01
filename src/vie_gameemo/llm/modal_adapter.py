@@ -5,9 +5,12 @@ Follows the multi-stream projection pattern from Emotion-LLaMAv2
 LLM token space, and the outputs are concatenated alongside the fusion
 projection to form the full soft-token sequence for the LLM.
 
-This gives the LLM direct access to both the fused representation AND
-per-modality raw features — matching v2's 448-token approach instead of
-collapsing everything into a single mean-pooled token.
+Text is intentionally excluded from soft tokens — the LLM already processes
+language natively, so the transcript is passed as raw text in the prompt
+instead. Only non-linguistic modalities (audio, face, context) are projected.
+
+Output token layout (along seq dim):
+    [penult_token | fusion_tokens | audio_tokens | face_tokens | context_tokens]
 
 Trained jointly with LLM LoRA during Stage 2 (cognition). Saved/loaded
 alongside cognition checkpoint under key "llm_adapter".
@@ -23,17 +26,19 @@ from torch import Tensor
 class ModalAdapter(nn.Module):
     """Multi-stream projection from fusion + raw modalities to LLM space.
 
-    Projects fusion output AND each raw modality separately into LLM
-    embedding space, then concatenates along the sequence dimension.
-    Generates attention masks to zero out missing modalities (e.g. face).
-
-    Output token layout (along seq dim):
-        [fusion_tokens | audio_tokens | face_tokens | context_tokens | text_tokens]
+    Projects fusion output AND each raw non-linguistic modality separately
+    into LLM embedding space, then concatenates along the sequence dimension.
+    Text is excluded because the LLM handles language natively — the
+    transcript is passed as raw text in the prompt instead.
 
     Args:
         d_fusion: Fusion embedding dim (768, output of ConvAttention4M).
         d_modality: Per-modality encoder output dim (768 by default).
-        d_llm: LLM hidden dim (4096 for Qwen2.5-7B / LLaMA-2-7B).
+        d_llm: LLM hidden dim (3584 for Qwen2.5-7B).
+        d_penult: MLP penultimate vector dim (256).
+        audio_dim: Raw audio encoder output dim (defaults to d_modality).
+        face_dim: Raw face encoder output dim (defaults to d_modality).
+        context_dim: Raw context encoder output dim (defaults to d_modality).
     """
 
     def __init__(
@@ -42,7 +47,6 @@ class ModalAdapter(nn.Module):
         d_modality: int = 768,
         d_llm: int = 4096,
         d_penult: int = 256,
-        text_dim: int | None = None,
         audio_dim: int | None = None,
         face_dim: int | None = None,
         context_dim: int | None = None,
@@ -58,7 +62,6 @@ class ModalAdapter(nn.Module):
         self.proj_audio = nn.Linear(audio_dim or d_modality, d_llm)
         self.proj_face = nn.Linear(face_dim or d_modality, d_llm)
         self.proj_context = nn.Linear(context_dim or d_modality, d_llm)
-        self.proj_text = nn.Linear(text_dim or d_modality, d_llm)
 
     def forward(
         self,
@@ -67,22 +70,17 @@ class ModalAdapter(nn.Module):
         audio: Tensor | None = None,
         face: Tensor | None = None,
         context: Tensor | None = None,
-        text: Tensor | None = None,
         has_face: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """Project fusion + raw modalities to LLM token space.
-
-        When raw modality tensors are not provided, falls back to
-        fusion-only projection (backward compatible with old callers).
+        """Project fusion + non-linguistic modalities to LLM token space.
 
         Args:
             fusion_emb: (B, T_f, d_fusion) fused output from ConvAttention4M.
-            penult: (B, 256) MLP penultimate vector. If provided, projected
-                and prepended as first soft token (faithfulness anchor).
-            audio: (B, T_a, d_modality) raw audio encoder output.
-            face: (B, T_face, d_modality) raw face encoder output.
-            context: (B, T_c, d_modality) raw context encoder output.
-            text: (B, T_t, d_modality) raw text encoder output.
+            penult: (B, d_penult) MLP penultimate vector. Projected and
+                prepended as first soft token (faithfulness anchor).
+            audio: (B, T_a, audio_dim) raw audio encoder output.
+            face: (B, T_face, face_dim) raw face encoder output.
+            context: (B, T_c, context_dim) raw context encoder output.
             has_face: (B,) bool tensor. False → face tokens are masked out.
 
         Returns:
@@ -93,20 +91,19 @@ class ModalAdapter(nn.Module):
         B = fusion_emb.shape[0]
         device = fusion_emb.device
 
-        # Penult token (faithfulness anchor from MLP classifier)
         parts: list[Tensor] = []
         mask_parts: list[Tensor] = []
 
         if penult is not None:
             if penult.dim() == 2:
-                penult = penult.unsqueeze(1)  # (B, 256) → (B, 1, 256)
+                penult = penult.unsqueeze(1)  # (B, d_penult) → (B, 1, d_penult)
             penult_tok = self.proj_penult(penult)  # (B, 1, d_llm)
             parts.append(penult_tok)
             mask_parts.append(torch.ones(B, penult_tok.shape[1], dtype=torch.long, device=device))
 
         fusion_tok = self.proj_fusion(fusion_emb)
 
-        raw_modalities = [audio, face, context, text]
+        raw_modalities = [audio, face, context]
         if all(m is None for m in raw_modalities) and penult is None:
             mask = torch.ones(B, fusion_tok.shape[1], dtype=torch.long, device=device)
             return fusion_tok, mask
@@ -120,7 +117,6 @@ class ModalAdapter(nn.Module):
             (audio, self.proj_audio, None),
             (face, self.proj_face, has_face),
             (context, self.proj_context, None),
-            (text, self.proj_text, None),
         ]
 
         for feat, proj, modality_mask in proj_map:
@@ -155,16 +151,16 @@ class ModalAdapter(nn.Module):
         """Load adapter weights from a checkpoint, auto-inferring per-modality dims.
 
         Reads proj_<modal>.weight shapes from the saved state dict to reconstruct
-        the exact architecture (e.g. text_dim=1024 for CafeBERT). Explicit
-        kwargs in modal_dims (text_dim, audio_dim, face_dim, context_dim) override
-        the inferred values.
+        the exact architecture. Explicit kwargs (audio_dim, face_dim, context_dim)
+        in modal_dims override inferred values. text_dim is ignored since
+        proj_text was removed.
         """
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         sd = ckpt.get("llm_adapter", ckpt)
 
         # Infer per-modality input dims from saved proj weights: shape is (d_llm, in_dim)
         inferred: dict[str, int] = {}
-        for modal in ("text", "audio", "face", "context"):
+        for modal in ("audio", "face", "context"):
             key = f"{modal}_dim"
             if key not in modal_dims:
                 w = sd.get(f"proj_{modal}.weight")

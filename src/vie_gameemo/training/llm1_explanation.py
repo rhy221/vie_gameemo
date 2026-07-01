@@ -242,10 +242,12 @@ def train_llm1_stage_a(
 
     # --- Trainable components ---
     llm_hidden = llm.config.hidden_size
+    # text_dim excluded: text goes into prompt as raw text, not soft token
+    _adapter_dims = {k: v for k, v in modality_dim_kwargs(fcfg).items() if k != "text_dim"}
     adapter = ModalAdapter(
         d_fusion=fcfg.d_model, d_llm=llm_hidden,
         d_penult=ccfg.hidden_dim,
-        **modality_dim_kwargs(fcfg),
+        **_adapter_dims,
     ).to(device)
 
     g_head_cfg = tcfg.g_head
@@ -422,10 +424,11 @@ def train_llm1_stage_b(
 
     # --- Load Stage A adapter + g_head ---
     llm_hidden = llm.config.hidden_size
+    _adapter_dims = {k: v for k, v in modality_dim_kwargs(fcfg).items() if k != "text_dim"}
     adapter = ModalAdapter(
         d_fusion=fcfg.d_model, d_llm=llm_hidden,
         d_penult=ccfg.hidden_dim,
-        **modality_dim_kwargs(fcfg),
+        **_adapter_dims,
     ).to(device)
 
     g_head_cfg = tcfg.g_head
@@ -587,7 +590,16 @@ def _compute_loss(
             clip_ids[i], transcripts[i], bool(has_face[i].item()),
         )
         target = f"Cues: {cue_text}. Emotion: {mlp_label}."
-        prompt = "Dựa trên đặc trưng đa phương thức, mô tả các đặc điểm quan sát được và xác định cảm xúc."
+
+        transcript = transcripts[i] if transcripts[i] else ""
+        if transcript:
+            prompt = (
+                f'Lời nói: "{transcript}"\n'
+                "Dựa trên đặc trưng đa phương thức và lời nói trên, "
+                "mô tả các đặc điểm quan sát được và xác định cảm xúc."
+            )
+        else:
+            prompt = "Dựa trên đặc trưng đa phương thức, mô tả các đặc điểm quan sát được và xác định cảm xúc."
 
         prompts.append(prompt)
         targets.append(target)
@@ -595,10 +607,10 @@ def _compute_loss(
 
     attr_tensor = torch.stack(attr_vecs).to(device)
 
-    # --- Soft tokens ---
+    # --- Soft tokens (text excluded — transcript passed as raw text in prompt) ---
     soft_tokens, soft_mask = adapter(
         fused, penult=penult, audio=audio, face=face,
-        context=context, text=text_feat, has_face=has_face,
+        context=context, has_face=has_face,
     )
     n_soft = soft_tokens.shape[1]
 
@@ -755,8 +767,6 @@ def _eval_agreement(
     n_agree = 0
     n_format = 0
 
-    prompt = "Dựa trên đặc trưng đa phương thức, mô tả các đặc điểm quan sát được và xác định cảm xúc."
-
     for batch in val_loader:
         if total >= n_samples:
             break
@@ -766,6 +776,7 @@ def _eval_agreement(
         context = batch["context"].to(device)
         text_feat = batch["text"].to(device)
         has_face = batch["has_face"].to(device)
+        transcripts = batch["transcript"]
         B = audio.shape[0]
 
         with torch.no_grad():
@@ -776,12 +787,22 @@ def _eval_agreement(
 
             soft_tokens, soft_mask = adapter(
                 fused, penult=penult, audio=audio, face=face,
-                context=context, text=text_feat, has_face=has_face,
+                context=context, has_face=has_face,
             )
 
             for i in range(min(B, n_samples - total)):
                 mlp_idx = int(logits[i].argmax().item())
                 mlp_label = _LABEL_NAMES[mlp_idx]
+
+                transcript = transcripts[i] if transcripts[i] else ""
+                if transcript:
+                    prompt = (
+                        f'Lời nói: "{transcript}"\n'
+                        "Dựa trên đặc trưng đa phương thức và lời nói trên, "
+                        "mô tả các đặc điểm quan sát được và xác định cảm xúc."
+                    )
+                else:
+                    prompt = "Dựa trên đặc trưng đa phương thức, mô tả các đặc điểm quan sát được và xác định cảm xúc."
 
                 text_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
                 text_embeds = llm.get_input_embeddings()(text_ids)

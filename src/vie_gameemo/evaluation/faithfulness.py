@@ -95,7 +95,7 @@ def eval_agreement(
 
             soft_tokens, _ = adapter(
                 fused, penult=penult, audio=audio, face=face,
-                context=context, text=text_feat, has_face=has_face,
+                context=context, has_face=has_face,
             )
 
             for i in range(min(B, n_samples - total)):
@@ -175,7 +175,7 @@ def eval_tap_a_ablation(
                 soft_normal, _ = adapter(
                     fused[i:i+1], penult=penult[i:i+1],
                     audio=audio[i:i+1], face=face[i:i+1],
-                    context=context[i:i+1], text=text_feat[i:i+1],
+                    context=context[i:i+1],
                     has_face=has_face[i:i+1],
                 )
                 raw_normal = _generate(llm, tokenizer, soft_normal, prompt, device)
@@ -189,7 +189,7 @@ def eval_tap_a_ablation(
                 soft_ablated, _ = adapter(
                     fused[i:i+1], penult=penult[i:i+1],
                     audio=zero_audio, face=zero_face,
-                    context=zero_ctx, text=zero_text,
+                    context=zero_ctx,
                     has_face=has_face[i:i+1],
                 )
                 raw_ablated = _generate(llm, tokenizer, soft_ablated, prompt, device)
@@ -243,7 +243,7 @@ def eval_nn_decode(
 
             soft_tokens, _ = adapter(
                 fused, penult=penult, audio=audio, face=face,
-                context=context, text=text_feat, has_face=has_face,
+                context=context, has_face=has_face,
             )
 
             for i in range(min(soft_tokens.shape[0], n_samples - total)):
@@ -363,12 +363,12 @@ def eval_counterfactual(
                         soft_orig, _ = adapter(
                             fused_orig[i:i+1], penult=penult_orig[i:i+1],
                             audio=audio[i:i+1], face=face[i:i+1],
-                            context=context[i:i+1], text=text_feat[i:i+1],
+                            context=context[i:i+1],
                             has_face=has_face[i:i+1],
                         )
                         soft_p, _ = adapter(
                             fused_p, penult=penult_p,
-                            audio=a_p, face=f_p, context=c_p, text=t_p,
+                            audio=a_p, face=f_p, context=c_p,
                             has_face=has_face[i:i+1],
                         )
 
@@ -452,7 +452,7 @@ def eval_hedge(
 
             soft_tokens, _ = adapter(
                 fused, penult=penult, audio=audio, face=face,
-                context=context, text=text_feat, has_face=has_face,
+                context=context, has_face=has_face,
             )
 
             mlp_conf_batch = F.softmax(logits, dim=-1).max(dim=-1).values  # (B,)

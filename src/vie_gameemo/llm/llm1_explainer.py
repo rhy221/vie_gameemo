@@ -224,16 +224,21 @@ class LLM1Explainer(BaseLLMReasoner):
                 audio=evidence.get("audio_emb"),
                 face=evidence.get("face_emb"),
                 context=evidence.get("context_emb"),
-                text=evidence.get("text_emb"),
                 has_face=evidence.get("has_face"),
             )
 
+            transcript = evidence.get("transcript", "")
             if self._trained_mode:
-                prompt = _CUE_PROMPT
+                if transcript:
+                    prompt = (
+                        f'Lời nói: "{transcript}"\n{_CUE_PROMPT}'
+                    )
+                else:
+                    prompt = _CUE_PROMPT
             else:
                 prompt = self.prompt_template.format(
                     label=label,
-                    transcript=evidence.get("transcript", ""),
+                    transcript=transcript,
                     source_language=evidence.get("source_language", "vi"),
                 )
             text_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.model.device)

@@ -249,7 +249,7 @@ def train_llm_perception(
 
             soft_tokens, soft_mask = llm_adapter(
                 fused, audio=audio, face=face, context=context,
-                text=text_feat, has_face=has_face,
+                has_face=has_face,
             )
 
             # Build per-sample prompts + targets
@@ -396,7 +396,7 @@ def _eval_llm_metrics(
                 fused = fused[0]
             soft_tokens, _ = llm_adapter(
                 fused, audio=audio, face=face, context=context,
-                text=text_feat, has_face=has_face,
+                has_face=has_face,
             )
 
             for i in range(min(B, n_samples - total)):
