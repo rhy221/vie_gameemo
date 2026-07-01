@@ -107,10 +107,15 @@ def main() -> int:
     if "face" in args.modalities:
         from vie_gameemo.encoders.face_vit import FaceEncoder
         logger.info("Loading face encoder...")
+        _face_cfg = cfg.visual_encoder.face_encoder
+        _tv_cfg = _face_cfg.tri_view.temporal
         encoders["face"] = FaceEncoder(
-            model_name=cfg.visual_encoder.face_encoder.model_name,
-            n_temporal_frames=cfg.visual_encoder.face_encoder.dual_view.temporal.n_frames,
-            target_size=tuple(cfg.visual_encoder.face_encoder.target_size),
+            model_name=_face_cfg.model_name,
+            n_temporal_frames=_tv_cfg.n_frames,
+            spatial_pool=tuple(_tv_cfg.spatial_pool),
+            temporal_spatial_pool=tuple(getattr(_tv_cfg, "temporal_spatial_pool", [2, 2])),
+            pool_method=_tv_cfg.pool_method,
+            target_size=tuple(_face_cfg.target_size),
             device=device,
         )
 

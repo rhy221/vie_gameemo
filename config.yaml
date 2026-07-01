@@ -298,9 +298,10 @@ visual_encoder:
       global:
         source: "middle_frame"   # heuristic: peak emotion often mid-clip
       temporal:
-        n_frames: 16             # sweet spot per spec ablation
-        spatial_pool: [4, 4]     # 4x4 → 16 patch tokens from peak frame
-        pool_method: "attention" # "mean" | "max" | "attention"
+        n_frames: 16                    # sweet spot per paper ablation (Fig 3b)
+        spatial_pool: [4, 4]            # peak frame global patches: 4×4 → 16 tokens
+        temporal_spatial_pool: [2, 2]   # per-frame temporal patches: 2×2 → 4 tokens/frame × 16 = 64 tokens (paper default)
+        pool_method: "attention"        # "mean" | "max" | "attention"
 
   # Path 2: context encoder (webcam region — body language, posture, background)
   # Set type to "pose" to switch to pose-kinematics branch; keep "vit_imagenet" for ablation.
@@ -311,9 +312,10 @@ visual_encoder:
     model_name: "google/vit-base-patch16-224"   # ImageNet pretrain
     n_frames: 16
     target_size: [224, 224]
-    spatial_pool: [2, 2]     # 2x2 → 4 patch tokens from peak frame
-    pool_method: "mean"      # "mean" | "max" | "attention"
-    # temporal_pool is deprecated: tri-view always keeps per-frame CLS tokens
+    spatial_pool: [2, 2]              # peak frame global patches: 2×2 → 4 tokens
+    temporal_spatial_pool: [2, 2]     # per-frame temporal patches: 2×2 → 4 tokens/frame × 16 = 64 tokens (paper default)
+    pool_method: "mean"               # "mean" | "max" | "attention"
+    # temporal_pool is deprecated: tri-view always uses spatially-pooled patches per frame
 
     # --- pose branch (new) ---
     pose_backend: "mediapipe"     # "mediapipe" | "mmpose"

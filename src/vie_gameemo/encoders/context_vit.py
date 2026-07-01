@@ -4,10 +4,11 @@ Tri-view design (mirrors FaceEncoder) to ensure both global features and
 video temporal features are captured:
     - Spatial view: peak (middle) frame PATCH tokens, spatially pooled
     - Global view: peak frame CLS token
-    - Temporal view: n_frames evenly-sampled frames, each CLS token kept
+    - Temporal view: n_frames evenly-sampled frames, each spatially pooled
+      to temporal_spatial_pool grid (e.g. 2×2 = 4 tokens/frame)
 
-Output layout: [peak_patches | global_CLS | temporal_CLS]
-Output shape: (B, n_patch_tokens + 1 + n_temporal_frames, 768)
+Output layout: [peak_patches | global_CLS | temporal_patches_flat]
+Output shape: (B, n_patch_tokens + 1 + n_frames * temporal_n_patch_tokens, 768)
 
 Prefers webcam region crops (body language, posture, background) when a
 webcam is detected. Falls back to full frames when no webcam is found,
@@ -35,11 +36,13 @@ class ContextEncoder(nn.Module):
           (UI elements, health bars, kill feed regions).
         - Global CLS from peak frame captures overall scene semantics
           (combat vs menu vs cutscene).
-        - Temporal CLS sequence captures scene changes over the 5-second clip
-          (calm → sudden action → reaction).
+        - Temporal patches: each sampled frame spatially pooled to
+          temporal_spatial_pool grid → richer spatio-temporal encoding than
+          CLS-only (paper: 2×2 → 4 tokens/frame × 16 frames = 64 tokens).
 
-    Output: (B, n_patch_tokens + 1 + n_temporal_frames, 768)
-    where n_patch_tokens = spatial_pool[0] * spatial_pool[1].
+    Output: (B, n_patch_tokens + 1 + n_frames * temporal_n_patch_tokens, 768)
+    where n_patch_tokens = spatial_pool[0] * spatial_pool[1]
+    and temporal_n_patch_tokens = temporal_spatial_pool[0] * temporal_spatial_pool[1].
     """
 
     def __init__(
@@ -47,6 +50,7 @@ class ContextEncoder(nn.Module):
         model_name: str = "google/vit-base-patch16-224",
         n_frames: int = 16,
         spatial_pool: tuple[int, int] = (2, 2),
+        temporal_spatial_pool: tuple[int, int] = (2, 2),
         pool_method: str = "mean",
         target_size: tuple[int, int] = (224, 224),
         temporal_pool: str | None = None,
@@ -57,19 +61,23 @@ class ContextEncoder(nn.Module):
         Args:
             model_name: HF model ID (ViT pretrained on ImageNet-21k).
             n_frames: Frames sampled for temporal view.
-            spatial_pool: (H, W) pooling grid on peak frame patches.
+            spatial_pool: (H, W) pooling grid for the peak frame (global spatial view).
+            temporal_spatial_pool: (H, W) pooling grid applied per temporal frame.
+                Each frame → temporal_spatial_pool[0]*temporal_spatial_pool[1] tokens.
+                Paper default: (2, 2) → 4 tokens/frame × 16 frames = 64 temporal tokens.
             pool_method: How to pool patches: 'mean' | 'max' | 'attention'.
                 'attention' weights patches by similarity to the peak CLS token
                 before spatial pooling (no learnable parameters required).
             target_size: Input frame resize target (W, H).
             temporal_pool: Deprecated parameter kept for backward compatibility;
-                ignored in tri-view design (temporal CLS tokens are always kept).
+                ignored in tri-view design (temporal patches are always preserved).
             device: Torch device.
         """
         super().__init__()
         self.model_name = model_name
         self.n_frames = n_frames
         self.spatial_pool = spatial_pool
+        self.temporal_spatial_pool = temporal_spatial_pool
         self.pool_method = pool_method
         self.target_size = target_size
         self.device = torch.device(device)
@@ -77,7 +85,7 @@ class ContextEncoder(nn.Module):
         if temporal_pool is not None:
             logger.warning(
                 "ContextEncoder: 'temporal_pool' is deprecated and ignored "
-                "in tri-view design. Temporal CLS tokens are always preserved."
+                "in tri-view design. Temporal patches are always preserved."
             )
 
         logger.info("Loading context ViT: %s", model_name)
@@ -94,8 +102,12 @@ class ContextEncoder(nn.Module):
         return self.spatial_pool[0] * self.spatial_pool[1]
 
     @property
+    def temporal_n_patch_tokens(self) -> int:
+        return self.temporal_spatial_pool[0] * self.temporal_spatial_pool[1]
+
+    @property
     def total_tokens(self) -> int:
-        return self.n_patch_tokens + 1 + self.n_frames
+        return self.n_patch_tokens + 1 + self.n_frames * self.temporal_n_patch_tokens
 
     @torch.no_grad()
     def encode(self, webcam_crops: list[np.ndarray] | None) -> Tensor:
@@ -106,8 +118,8 @@ class ContextEncoder(nn.Module):
                 If None or empty, returns zeros (no-webcam mode).
 
         Returns:
-            Tensor of shape (1, n_patch_tokens + 1 + n_temporal_frames, 768):
-                [peak_patches | global_CLS | temporal_CLS]
+            Tensor of shape (1, n_patch_tokens + 1 + n_frames*t_n_patch, 768):
+                [peak_patches | global_CLS | temporal_patches_flat]
         """
         if not webcam_crops:
             return torch.zeros(1, self.total_tokens, 768, device=self.device)
@@ -123,18 +135,24 @@ class ContextEncoder(nn.Module):
             peak_patches, global_cls, self.spatial_pool[0], self.spatial_pool[1],
         )  # (1, n_patch, 768)
 
-        # Temporal view: n_frames uniformly sampled, each CLS kept separately
+        # Temporal view: n_frames uniformly sampled, each spatially pooled
+        # (paper: 2×2 → 4 tokens/frame × 16 frames = 64 temporal tokens)
         sampled = _uniform_sample(frames_pil, self.n_frames)
-        temporal_cls = torch.cat(
-            [self._encode_single_frame(f) for f in sampled], dim=0
-        )  # (n_frames, 768)
-        temporal_cls = temporal_cls.unsqueeze(0)  # (1, n_frames, 768)
+        temporal_parts = []
+        for f in sampled:
+            frame_cls, frame_patches = self._encode_full_frame(f)
+            pooled = self._spatial_pool_patches(
+                frame_patches, frame_cls,
+                self.temporal_spatial_pool[0], self.temporal_spatial_pool[1],
+            )  # (1, t_n_patch, 768)
+            temporal_parts.append(pooled)
+        temporal = torch.cat(temporal_parts, dim=1)  # (1, n_frames*t_n_patch, 768)
 
-        # [peak_patches | global_CLS | temporal_CLS]
+        # [peak_patches | global_CLS | temporal_patches_flat]
         combined = torch.cat([
             pooled_patches,
             global_cls.unsqueeze(0),
-            temporal_cls,
+            temporal,
         ], dim=1)
         return combined  # (1, total_tokens, 768)
 
@@ -146,7 +164,7 @@ class ContextEncoder(nn.Module):
             frame_paths: Paths to extracted frame images.
 
         Returns:
-            Tensor of shape (1, n_patch_tokens + 1 + n_temporal_frames, 768).
+            Tensor of shape (1, n_patch_tokens + 1 + n_frames*t_n_patch, 768).
         """
         if not frame_paths:
             return torch.zeros(1, self.total_tokens, 768, device=self.device)
@@ -163,11 +181,17 @@ class ContextEncoder(nn.Module):
             peak_patches, global_cls, self.spatial_pool[0], self.spatial_pool[1],
         )
 
-        temporal_cls = torch.cat(
-            [self._encode_single_frame(f) for f in frames_pil], dim=0
-        ).unsqueeze(0)  # (1, n_frames, 768)
+        temporal_parts = []
+        for f in frames_pil:
+            frame_cls, frame_patches = self._encode_full_frame(f)
+            pooled = self._spatial_pool_patches(
+                frame_patches, frame_cls,
+                self.temporal_spatial_pool[0], self.temporal_spatial_pool[1],
+            )
+            temporal_parts.append(pooled)
+        temporal = torch.cat(temporal_parts, dim=1)  # (1, n_frames*t_n_patch, 768)
 
-        return torch.cat([pooled_patches, global_cls.unsqueeze(0), temporal_cls], dim=1)
+        return torch.cat([pooled_patches, global_cls.unsqueeze(0), temporal], dim=1)
 
     @torch.no_grad()
     def encode_batch(
@@ -183,13 +207,6 @@ class ContextEncoder(nn.Module):
         """
         tensors = [self.encode(crops) for crops in batch_webcam_crops]
         return torch.cat(tensors, dim=0)
-
-    def _encode_single_frame(self, frame_pil: Image.Image) -> Tensor:
-        """Encode one PIL image; return CLS token (1, 768)."""
-        inputs = self.processor(images=frame_pil, return_tensors="pt")
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        outputs = self.model(**inputs)
-        return outputs.last_hidden_state[:, 0, :]  # CLS token (1, 768)
 
     def _encode_full_frame(self, frame_pil: Image.Image) -> tuple[Tensor, Tensor]:
         """Encode one PIL image; return CLS and patch tokens separately.

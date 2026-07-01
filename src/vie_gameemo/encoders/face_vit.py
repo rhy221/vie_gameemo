@@ -4,9 +4,11 @@ Encodes the streamer's face (cropped from webcam region) using ViT pretrained
 on AffectNet for facial expression recognition. Uses a tri-view design:
     - Spatial view: peak frame PATCH tokens (pooled) for micro-expression detail
     - Global view: peak frame CLS token
-    - Temporal view: 16 evenly-sampled frames, each CLS token kept
+    - Temporal view: n_temporal_frames evenly-sampled frames, each spatially
+      pooled to temporal_spatial_pool grid (e.g. 2×2 = 4 tokens/frame)
 
-Output layout: [peak_patches | global_CLS | temporal_CLS]
+Output layout: [peak_patches | global_CLS | temporal_patches_flat]
+Output shape: (B, n_patch_tokens + 1 + n_temporal_frames * temporal_n_patch, 768)
 
 IMPORTANT: This encoder receives FACE CROPS from face_crop.py, not full
 frames. Do not feed full frames into ViT-FER (distribution mismatch with
@@ -29,8 +31,9 @@ logger = logging.getLogger(__name__)
 class FaceEncoder(nn.Module):
     """Tri-view face encoder using ViT-FER (Path 1 of dual-path).
 
-    Output: (B, n_patch_tokens + 1 + n_temporal_frames, 768)
-    where n_patch_tokens = spatial_pool[0] * spatial_pool[1].
+    Output: (B, n_patch_tokens + 1 + n_temporal_frames * temporal_n_patch_tokens, 768)
+    where n_patch_tokens = spatial_pool[0] * spatial_pool[1]
+    and temporal_n_patch_tokens = temporal_spatial_pool[0] * temporal_spatial_pool[1].
     """
 
     def __init__(
@@ -38,6 +41,7 @@ class FaceEncoder(nn.Module):
         model_name: str = "trpakov/vit-face-expression",
         n_temporal_frames: int = 16,
         spatial_pool: tuple[int, int] = (4, 4),
+        temporal_spatial_pool: tuple[int, int] = (2, 2),
         pool_method: str = "mean",
         target_size: tuple[int, int] = (224, 224),
         device: str | torch.device = "cuda",
@@ -47,7 +51,10 @@ class FaceEncoder(nn.Module):
         Args:
             model_name: HF model ID (ViT-FER pretrained on AffectNet).
             n_temporal_frames: Frames sampled for temporal view.
-            spatial_pool: (H, W) pooling grid on peak frame patches.
+            spatial_pool: (H, W) pooling grid for the peak frame (global spatial view).
+            temporal_spatial_pool: (H, W) pooling grid applied per temporal frame.
+                Each frame → temporal_spatial_pool[0]*temporal_spatial_pool[1] tokens.
+                Paper default: (2, 2) → 4 tokens/frame × 16 frames = 64 temporal tokens.
             pool_method: How to pool patches: 'mean' | 'max' | 'attention'.
                 'attention' weights patches by similarity to the CLS token
                 before spatial pooling, highlighting emotion-salient regions.
@@ -58,6 +65,7 @@ class FaceEncoder(nn.Module):
         self.model_name = model_name
         self.n_temporal_frames = n_temporal_frames
         self.spatial_pool = spatial_pool
+        self.temporal_spatial_pool = temporal_spatial_pool
         self.pool_method = pool_method
         self.target_size = target_size
         self.device = torch.device(device)
@@ -76,8 +84,12 @@ class FaceEncoder(nn.Module):
         return self.spatial_pool[0] * self.spatial_pool[1]
 
     @property
+    def temporal_n_patch_tokens(self) -> int:
+        return self.temporal_spatial_pool[0] * self.temporal_spatial_pool[1]
+
+    @property
     def total_tokens(self) -> int:
-        return self.n_patch_tokens + 1 + self.n_temporal_frames
+        return self.n_patch_tokens + 1 + self.n_temporal_frames * self.temporal_n_patch_tokens
 
     @torch.no_grad()
     def encode(
@@ -92,8 +104,8 @@ class FaceEncoder(nn.Module):
 
         Returns:
             Tuple of:
-                - Tensor (1, T, 768) where T = n_patch + 1 + n_temporal:
-                  [peak_patches | global_CLS | temporal_CLS]
+                - Tensor (1, T, 768) where T = n_patch + 1 + n_temporal*t_n_patch:
+                  [peak_patches | global_CLS | temporal_patches_flat]
                 - has_face: True if real face data, False for zeros placeholder
         """
         if not face_crops:
@@ -110,18 +122,24 @@ class FaceEncoder(nn.Module):
             peak_patches, peak_cls, self.spatial_pool[0], self.spatial_pool[1],
         )  # (1, n_patch, 768)
 
-        # Temporal view: n_temporal_frames uniformly sampled
+        # Temporal view: n_temporal_frames uniformly sampled, each spatially pooled
+        # (paper: 2×2 → 4 tokens/frame × 16 frames = 64 temporal tokens)
         sampled = _uniform_sample(frames_pil, self.n_temporal_frames)
-        temporal_cls = torch.cat(
-            [self._encode_single_frame(f) for f in sampled], dim=0
-        )  # (n_temporal_frames, 768)
-        temporal_cls = temporal_cls.unsqueeze(0)  # (1, n_temporal, 768)
+        temporal_parts = []
+        for f in sampled:
+            frame_cls, frame_patches = self._encode_full_frame(f)
+            pooled = self._spatial_pool_patches(
+                frame_patches, frame_cls,
+                self.temporal_spatial_pool[0], self.temporal_spatial_pool[1],
+            )  # (1, t_n_patch, 768)
+            temporal_parts.append(pooled)
+        temporal = torch.cat(temporal_parts, dim=1)  # (1, n_temporal*t_n_patch, 768)
 
-        # [peak_patches | global_CLS | temporal_CLS]
+        # [peak_patches | global_CLS | temporal_patches_flat]
         combined = torch.cat([
             pooled_patches,
             peak_cls.unsqueeze(0),
-            temporal_cls,
+            temporal,
         ], dim=1)
         return combined, True
 
@@ -145,13 +163,6 @@ class FaceEncoder(nn.Module):
             tensors.append(t)
             flags.append(flag)
         return torch.cat(tensors, dim=0), flags
-
-    def _encode_single_frame(self, frame_pil: Image.Image) -> Tensor:
-        """Encode one PIL image; return CLS token (1, 768)."""
-        inputs = self.processor(images=frame_pil, return_tensors="pt")
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        outputs = self.model(**inputs)
-        return outputs.last_hidden_state[:, 0, :]  # CLS token (1, 768)
 
     def _encode_full_frame(self, frame_pil: Image.Image) -> tuple[Tensor, Tensor]:
         """Encode one PIL image; return CLS token and patch tokens separately.

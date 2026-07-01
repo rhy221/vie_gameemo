@@ -58,10 +58,12 @@ def get_context_encoder(cfg) -> nn.Module:
         from vie_gameemo.encoders.context_vit import ContextEncoder
 
         raw_pool = getattr(ctx_cfg, "spatial_pool", [2, 2])
+        raw_temporal_pool = getattr(ctx_cfg, "temporal_spatial_pool", [2, 2])
         return ContextEncoder(
             model_name=getattr(ctx_cfg, "model_name", "google/vit-base-patch16-224"),
             n_frames=getattr(ctx_cfg, "n_frames", 16),
             spatial_pool=tuple(raw_pool),
+            temporal_spatial_pool=tuple(raw_temporal_pool),
             pool_method=getattr(ctx_cfg, "pool_method", "mean"),
             target_size=tuple(getattr(ctx_cfg, "target_size", (224, 224))),
             temporal_pool=getattr(ctx_cfg, "temporal_pool", None),
