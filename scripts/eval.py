@@ -124,6 +124,7 @@ def _run_eval(cfg, args) -> dict:
         hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes,
         dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
     load_checkpoint(args.checkpoint, fusion, classifier)
     fusion.eval()
