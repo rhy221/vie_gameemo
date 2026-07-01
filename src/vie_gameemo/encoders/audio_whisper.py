@@ -103,7 +103,7 @@ class WhisperAudioEncoder(nn.Module):
         model_dtype = next(self.encoder.parameters()).dtype
         input_features = inputs.input_features.to(self.device, dtype=model_dtype)
 
-        hidden = self.encoder(input_features).last_hidden_state
+        hidden = self.encoder(input_features).last_hidden_state.float()
 
         if self.proj is not None:
             hidden = self.proj(hidden)
