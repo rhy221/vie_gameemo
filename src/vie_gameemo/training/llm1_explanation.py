@@ -422,6 +422,10 @@ def train_llm1_stage_b(
     llm = get_peft_model(llm, lora_config)
     llm.print_trainable_parameters()
 
+    # Recompute activations during backward instead of storing all 28-layer activations.
+    # Saves ~50% activation VRAM at ~30% extra compute cost — essential for 7B + LoRA on 32GB.
+    llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
     # --- Load Stage A adapter + g_head ---
     llm_hidden = llm.config.hidden_size
     _adapter_dims = {k: v for k, v in modality_dim_kwargs(fcfg).items() if k != "text_dim"}
@@ -442,7 +446,7 @@ def train_llm1_stage_b(
         **modality_dim_kwargs(fcfg),
     ).to(device)
 
-    sa_ckpt = torch.load(stage_a_checkpoint, map_location="cpu")
+    sa_ckpt = torch.load(stage_a_checkpoint, map_location="cpu", weights_only=True)
     adapter.load_state_dict(sa_ckpt["llm_adapter"], strict=False)
     g_head.load_state_dict(sa_ckpt["g_head"])
     logger.info("Loaded Stage A checkpoint: %s", stage_a_checkpoint)

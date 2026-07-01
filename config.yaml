@@ -530,8 +530,8 @@ training:
     epochs_a: 15            # Stage A: alignment (ModalAdapter + g_head only)
     epochs_b: 10            # Stage B: LoRA fine-tune (optional)
     run_stage_b: false      # Set true to run Stage B after Stage A
-    batch_size: 8
-    gradient_accumulation: 4
+    batch_size: 2
+    gradient_accumulation: 16
     learning_rate:
       adapter: 2.0e-4
       g_head: 2.0e-4
