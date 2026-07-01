@@ -17,6 +17,19 @@ from vie_gameemo.preprocess.webcam_detector import WebcamBBox
 
 logger = logging.getLogger(__name__)
 
+_face_detector = None
+
+
+def _get_face_detector():
+    """Return a shared FaceDetection instance (created once per process)."""
+    global _face_detector
+    if _face_detector is None:
+        import mediapipe as mp
+        _face_detector = mp.solutions.face_detection.FaceDetection(
+            min_detection_confidence=0.5, model_selection=0,
+        )
+    return _face_detector
+
 
 def extract_streamer_face(
     frame: np.ndarray,
@@ -194,9 +207,7 @@ def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> np.ndarray:
         h, w = region.shape[:2]
 
         if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_detection"):
-            detector = mp.solutions.face_detection.FaceDetection(
-                min_detection_confidence=0.5, model_selection=0
-            )
+            detector = _get_face_detector()
             results = detector.process(rgb)
             if results.detections:
                 bb = results.detections[0].location_data.relative_bounding_box
