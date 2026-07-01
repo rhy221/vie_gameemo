@@ -12,8 +12,18 @@ import logging
 import re
 
 import torch
+import torch.nn as nn
 
 from vie_gameemo.llm.base import BaseLLMReasoner, LLMOutput
+
+if not hasattr(nn.Module, "set_submodule"):
+    def _set_submodule(self, target: str, module: nn.Module) -> None:
+        parts = target.split(".")
+        parent = self
+        for part in parts[:-1]:
+            parent = getattr(parent, part)
+        setattr(parent, parts[-1], module)
+    nn.Module.set_submodule = _set_submodule  # type: ignore[method-assign]
 
 logger = logging.getLogger(__name__)
 

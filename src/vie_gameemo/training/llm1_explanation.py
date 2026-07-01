@@ -25,6 +25,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+# PyTorch < 2.1 lacks nn.Module.set_submodule, which newer transformers/bitsandbytes
+# call during 4-bit quantization. Patch it if missing so quantization still works.
+if not hasattr(nn.Module, "set_submodule"):
+    def _set_submodule(self, target: str, module: nn.Module) -> None:
+        parts = target.split(".")
+        parent = self
+        for part in parts[:-1]:
+            parent = getattr(parent, part)
+        setattr(parent, parts[-1], module)
+    nn.Module.set_submodule = _set_submodule  # type: ignore[method-assign]
+
 logger = logging.getLogger(__name__)
 
 _LABEL_NAMES = ["neutral", "hype", "amused", "tilted", "sad", "shocked", "fear", "disgusted"]
