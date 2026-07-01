@@ -133,7 +133,9 @@ def train_llm_perception(
 
     # Load fusion (init from MLP perception, fine-tune for LLM) + classifier (frozen)
     fusion = get_fusion(
-        fcfg.type, d_model=fcfg.d_model, n_modalities=fcfg.n_modalities,
+        fcfg.type, d_model=fcfg.d_model,
+        compress_dim=getattr(fcfg, "compress_dim", 128),
+        n_modalities=fcfg.n_modalities,
         n_conv_blocks=getattr(fcfg, "n_conv_blocks", 4),
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
@@ -142,6 +144,7 @@ def train_llm_perception(
     classifier = EmotionClassifier(
         d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes, dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
 
     ckpt = torch.load(perception_checkpoint, map_location="cpu")
@@ -532,6 +535,7 @@ def train_cognition(
     fusion = get_fusion(
         fcfg.type,
         d_model=fcfg.d_model,
+        compress_dim=getattr(fcfg, "compress_dim", 128),
         n_modalities=fcfg.n_modalities,
         n_conv_blocks=getattr(fcfg, "n_conv_blocks", 4),
         kernel_size=getattr(fcfg, "kernel_size", 3),
@@ -543,6 +547,7 @@ def train_cognition(
         hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes,
         dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
 
     fusion_ckpt = torch.load(fusion_source, map_location="cpu")

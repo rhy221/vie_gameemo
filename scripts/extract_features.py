@@ -116,6 +116,8 @@ def main() -> int:
             temporal_spatial_pool=tuple(getattr(_tv_cfg, "temporal_spatial_pool", [2, 2])),
             pool_method=_tv_cfg.pool_method,
             target_size=tuple(_face_cfg.target_size),
+            use_temporal_3d_pool=getattr(_tv_cfg, "use_temporal_3d_pool", False),
+            temporal_3d_pool=tuple(getattr(_tv_cfg, "temporal_3d_pool", [4, 4, 4])),
             device=device,
         )
 

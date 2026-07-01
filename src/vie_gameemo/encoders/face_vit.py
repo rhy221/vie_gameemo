@@ -21,6 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torch import Tensor, nn
 from transformers import AutoImageProcessor, ViTModel
@@ -44,6 +45,8 @@ class FaceEncoder(nn.Module):
         temporal_spatial_pool: tuple[int, int] = (2, 2),
         pool_method: str = "mean",
         target_size: tuple[int, int] = (224, 224),
+        use_temporal_3d_pool: bool = False,
+        temporal_3d_pool: tuple[int, int, int] = (4, 4, 4),
         device: str | torch.device = "cuda",
     ) -> None:
         """Initialize face encoder.
@@ -59,6 +62,12 @@ class FaceEncoder(nn.Module):
                 'attention' weights patches by similarity to the CLS token
                 before spatial pooling, highlighting emotion-salient regions.
             target_size: Input frame resize target (W, H).
+            use_temporal_3d_pool: If True, pool all temporal frames jointly in 3D
+                (T, H, W) instead of per-frame 2D. More coherent spatio-temporal
+                representation; same token count when T'*H'*W' == n_temporal_frames *
+                temporal_spatial_pool[0]*temporal_spatial_pool[1].
+            temporal_3d_pool: (T', H', W') output grid when use_temporal_3d_pool=True.
+                Default (4,4,4) → 64 tokens (same as 16 frames × 2×2 per-frame).
             device: Torch device.
         """
         super().__init__()
@@ -68,6 +77,8 @@ class FaceEncoder(nn.Module):
         self.temporal_spatial_pool = temporal_spatial_pool
         self.pool_method = pool_method
         self.target_size = target_size
+        self.use_temporal_3d_pool = use_temporal_3d_pool
+        self.temporal_3d_pool = temporal_3d_pool
         self.device = torch.device(device)
 
         logger.info("Loading ViT-FER: %s", model_name)
@@ -89,7 +100,11 @@ class FaceEncoder(nn.Module):
 
     @property
     def total_tokens(self) -> int:
-        return self.n_patch_tokens + 1 + self.n_temporal_frames * self.temporal_n_patch_tokens
+        if self.use_temporal_3d_pool:
+            t_tokens = self.temporal_3d_pool[0] * self.temporal_3d_pool[1] * self.temporal_3d_pool[2]
+        else:
+            t_tokens = self.n_temporal_frames * self.temporal_n_patch_tokens
+        return self.n_patch_tokens + 1 + t_tokens
 
     @torch.no_grad()
     def encode(
@@ -122,18 +137,20 @@ class FaceEncoder(nn.Module):
             peak_patches, peak_cls, self.spatial_pool[0], self.spatial_pool[1],
         )  # (1, n_patch, 768)
 
-        # Temporal view: n_temporal_frames uniformly sampled, each spatially pooled
-        # (paper: 2×2 → 4 tokens/frame × 16 frames = 64 temporal tokens)
+        # Temporal view: n_temporal_frames uniformly sampled
         sampled = _uniform_sample(frames_pil, self.n_temporal_frames)
-        temporal_parts = []
-        for f in sampled:
-            frame_cls, frame_patches = self._encode_full_frame(f)
-            pooled = self._spatial_pool_patches(
-                frame_patches, frame_cls,
-                self.temporal_spatial_pool[0], self.temporal_spatial_pool[1],
-            )  # (1, t_n_patch, 768)
-            temporal_parts.append(pooled)
-        temporal = torch.cat(temporal_parts, dim=1)  # (1, n_temporal*t_n_patch, 768)
+        if self.use_temporal_3d_pool:
+            temporal = self._temporal_3d_pool(sampled)
+        else:
+            temporal_parts = []
+            for f in sampled:
+                frame_cls, frame_patches = self._encode_full_frame(f)
+                pooled = self._spatial_pool_patches(
+                    frame_patches, frame_cls,
+                    self.temporal_spatial_pool[0], self.temporal_spatial_pool[1],
+                )  # (1, t_n_patch, 768)
+                temporal_parts.append(pooled)
+            temporal = torch.cat(temporal_parts, dim=1)  # (1, n_temporal*t_n_patch, 768)
 
         # [peak_patches | global_CLS | temporal_patches_flat]
         combined = torch.cat([
@@ -163,6 +180,29 @@ class FaceEncoder(nn.Module):
             tensors.append(t)
             flags.append(flag)
         return torch.cat(tensors, dim=0), flags
+
+    def _temporal_3d_pool(self, frames_pil: list) -> Tensor:
+        """Pool all temporal frames jointly in 3D (T, H, W) → (T'*H'*W', D).
+
+        Captures spatio-temporal correlations across frames jointly rather than
+        pooling each frame independently. Output token count equals
+        temporal_3d_pool[0] * temporal_3d_pool[1] * temporal_3d_pool[2].
+        """
+        all_patches = []
+        for f in frames_pil:
+            _, frame_patches = self._encode_full_frame(f)  # (1, N, D)
+            all_patches.append(frame_patches)
+
+        T = len(all_patches)
+        patches_stack = torch.cat(all_patches, dim=0)  # (T, N, D)
+        _, N, D = patches_stack.shape
+        grid = int(N ** 0.5)
+
+        vol = patches_stack.view(T, grid, grid, D)            # (T, H, W, D)
+        vol = vol.permute(3, 0, 1, 2).unsqueeze(0)           # (1, D, T, H, W)
+        td, th, tw = self.temporal_3d_pool
+        pooled = F.adaptive_avg_pool3d(vol, (td, th, tw))    # (1, D, td, th, tw)
+        return pooled.permute(0, 2, 3, 4, 1).reshape(1, td * th * tw, D)
 
     def _encode_full_frame(self, frame_pil: Image.Image) -> tuple[Tensor, Tensor]:
         """Encode one PIL image; return CLS token and patch tokens separately.

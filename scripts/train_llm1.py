@@ -92,7 +92,10 @@ def main() -> int:
     if args.precompute_cues or args.stage in ("a", "both"):
         from vie_gameemo.llm.cue_extractor import CueExtractor
 
-        extractor = CueExtractor(cache_dir=cfg.paths.cache)
+        _ctx_cfg = getattr(getattr(cfg, "visual_encoder", None), "context_encoder", None)
+        ctx_encoder_type = getattr(_ctx_cfg, "type", "vit_imagenet") if _ctx_cfg is not None else "vit_imagenet"
+
+        extractor = CueExtractor(cache_dir=cfg.paths.cache, context_encoder_type=ctx_encoder_type)
         extractor.precompute_all(
             faces_dir=cfg.paths.faces,
             audios_dir=cfg.paths.audios,
@@ -138,6 +141,7 @@ def main() -> int:
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
         num_workers=cfg.compute.num_workers,
+        pin_memory=cfg.compute.pin_memory,
         collate_fn=collate_fn_llm1,
     )
 
