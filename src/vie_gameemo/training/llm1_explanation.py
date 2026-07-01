@@ -68,21 +68,25 @@ class GHeadPerModality(nn.Module):
         n_motion: int = 3,
         n_text: int = 4,
         has_context: bool = True,
+        text_dim: int | None = None,
+        audio_dim: int | None = None,
+        face_dim: int | None = None,
+        context_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.has_context = has_context
 
-        def _head(n_out: int) -> nn.Sequential:
+        def _head(in_dim: int, n_out: int) -> nn.Sequential:
             return nn.Sequential(
-                nn.Linear(d_input, hidden_dim),
+                nn.Linear(in_dim, hidden_dim),
                 nn.GELU(),
                 nn.Linear(hidden_dim, n_out),
             )
 
-        self.face_head = _head(n_face)
-        self.voice_head = _head(n_voice)
-        self.text_head = _head(n_text)
-        self.motion_head = _head(n_motion) if has_context else None
+        self.face_head = _head(face_dim or d_input, n_face)
+        self.voice_head = _head(audio_dim or d_input, n_voice)
+        self.text_head = _head(text_dim or d_input, n_text)
+        self.motion_head = _head(context_dim or d_input, n_motion) if has_context else None
 
     def forward(
         self,
@@ -252,6 +256,7 @@ def train_llm1_stage_a(
         d_input=fcfg.d_model,
         hidden_dim=g_head_cfg.hidden_dim,
         has_context=has_context,
+        **modality_dim_kwargs(fcfg),
     ).to(device)
 
     cue_extractor = CueExtractor(cache_dir=cfg.paths.cache, context_encoder_type=ctx_encoder_type)
@@ -421,6 +426,7 @@ def train_llm1_stage_b(
         d_input=fcfg.d_model,
         hidden_dim=g_head_cfg.hidden_dim,
         has_context=has_context,
+        **modality_dim_kwargs(fcfg),
     ).to(device)
 
     sa_ckpt = torch.load(stage_a_checkpoint, map_location="cpu")
