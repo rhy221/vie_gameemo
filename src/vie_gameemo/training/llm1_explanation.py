@@ -98,6 +98,23 @@ class GHeadPerModality(nn.Module):
         return face_pred, voice_pred, motion_pred, text_pred
 
 
+def _infer_fusion_dims(ckpt: dict) -> dict:
+    """Read per-modality input dims from saved fusion weights.
+
+    Inspects mlp_<modal>.weight shape in the checkpoint's fusion_state_dict.
+    Shape is (d_model, in_dim), so in_dim = weight.shape[1].
+    Used to reconstruct the fusion module with the exact architecture that
+    was used during perception training (avoids config/checkpoint mismatch).
+    """
+    dims: dict[str, int] = {}
+    sd = ckpt.get("fusion_state_dict", {})
+    for modal in ("text", "audio", "face", "context"):
+        w = sd.get(f"mlp_{modal}.weight")
+        if w is not None:
+            dims[f"{modal}_dim"] = w.shape[1]
+    return dims
+
+
 def collate_fn_llm1(batch: list[dict]) -> dict:
     """Extended collate that preserves metadata for LLM-1 training."""
     from vie_gameemo.data.dataset import _pad_and_stack
@@ -153,7 +170,7 @@ def train_llm1_stage_a(
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from vie_gameemo.classifiers.mlp import EmotionClassifier
-    from vie_gameemo.fusion import get_fusion
+    from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.llm.cue_extractor import CueExtractor
     from vie_gameemo.llm.modal_adapter import ModalAdapter
 
@@ -163,19 +180,24 @@ def train_llm1_stage_a(
     llm_cfg = cfg.llm
 
     # --- Load frozen components ---
+    # Load checkpoint first so we can infer the exact per-modality dims that
+    # were used during perception training (e.g. text_dim=1024 for CafeBERT).
+    # This avoids a size-mismatch when the config value differs from the saved weights.
+    ckpt = torch.load(perception_checkpoint, map_location="cpu", weights_only=True)
+    _dim_kwargs = {**modality_dim_kwargs(fcfg), **_infer_fusion_dims(ckpt)}
     fusion = get_fusion(
         fcfg.type, d_model=fcfg.d_model, n_modalities=fcfg.n_modalities,
         n_conv_blocks=getattr(fcfg, "n_conv_blocks", 4),
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
+        **_dim_kwargs,
     ).to(device)
     classifier = EmotionClassifier(
         d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes, dropout=ccfg.dropout,
     ).to(device)
 
-    ckpt = torch.load(perception_checkpoint, map_location="cpu")
     fusion.load_state_dict(ckpt["fusion_state_dict"])
     classifier.load_state_dict(ckpt["classifier_state_dict"])
 
@@ -315,7 +337,7 @@ def train_llm1_stage_b(
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from vie_gameemo.classifiers.mlp import EmotionClassifier
-    from vie_gameemo.fusion import get_fusion
+    from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.llm.cue_extractor import CueExtractor
     from vie_gameemo.llm.modal_adapter import ModalAdapter
 
@@ -325,19 +347,21 @@ def train_llm1_stage_b(
     llm_cfg = cfg.llm
 
     # --- Frozen perception ---
+    ckpt = torch.load(perception_checkpoint, map_location="cpu", weights_only=True)
+    _dim_kwargs = {**modality_dim_kwargs(fcfg), **_infer_fusion_dims(ckpt)}
     fusion = get_fusion(
         fcfg.type, d_model=fcfg.d_model, n_modalities=fcfg.n_modalities,
         n_conv_blocks=getattr(fcfg, "n_conv_blocks", 4),
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
+        **_dim_kwargs,
     ).to(device)
     classifier = EmotionClassifier(
         d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes, dropout=ccfg.dropout,
     ).to(device)
 
-    ckpt = torch.load(perception_checkpoint, map_location="cpu")
     fusion.load_state_dict(ckpt["fusion_state_dict"])
     classifier.load_state_dict(ckpt["classifier_state_dict"])
     for p in list(fusion.parameters()) + list(classifier.parameters()):
