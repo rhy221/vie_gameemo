@@ -175,11 +175,12 @@ class ConvAttention4M(nn.Module):
         self.align_to = align_to
         self.return_attention = return_attention
 
-        # Per-modality compression: d_model → compress_dim (e.g. 768 → 128)
-        self.mlp_audio = nn.Linear(d_model, compress_dim)
-        self.mlp_face = nn.Linear(d_model, compress_dim)
-        self.mlp_context = nn.Linear(d_model, compress_dim)
-        self.mlp_text = nn.Linear(d_model, compress_dim)
+        # Per-modality compression → compress_dim. Use per-modality dim when the
+        # encoder output differs from d_model (e.g. CafeBERT/XLM-R-large = 1024).
+        self.mlp_audio   = nn.Linear(audio_dim   or d_model, compress_dim)
+        self.mlp_face    = nn.Linear(face_dim    or d_model, compress_dim)
+        self.mlp_context = nn.Linear(context_dim or d_model, compress_dim)
+        self.mlp_text    = nn.Linear(text_dim    or d_model, compress_dim)
 
         in_dim = compress_dim * n_modalities  # 512 (was d_model*n_modalities = 3072)
         self.conv_branch = ConvBranch(
