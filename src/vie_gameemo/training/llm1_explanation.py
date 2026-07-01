@@ -587,7 +587,9 @@ def _compute_loss(
 
     embed_fn = llm.get_input_embeddings()
     full_embeds = embed_fn(full_enc["input_ids"])
-    inputs_embeds = torch.cat([soft_tokens, full_embeds], dim=1)
+    # Cast soft_tokens to match LLM dtype (e.g. bfloat16 for Qwen2.5 with BnB).
+    # Adapter stays in float32 for gradient precision; only the LLM input is cast.
+    inputs_embeds = torch.cat([soft_tokens.to(full_embeds.dtype), full_embeds], dim=1)
     attn_mask = torch.cat([soft_mask, full_enc["attention_mask"]], dim=1)
 
     lm_labels = full_enc["input_ids"].clone()
@@ -757,7 +759,7 @@ def _eval_agreement(
 
                 text_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
                 text_embeds = llm.get_input_embeddings()(text_ids)
-                inputs_embeds = torch.cat([soft_tokens[i:i+1], text_embeds], dim=1)
+                inputs_embeds = torch.cat([soft_tokens[i:i+1].to(text_embeds.dtype), text_embeds], dim=1)
 
                 out_ids = llm.generate(
                     inputs_embeds=inputs_embeds,

@@ -239,7 +239,7 @@ class LLM1Explainer(BaseLLMReasoner):
             text_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.model.device)
             text_embeds = self.model.get_input_embeddings()(text_ids)
 
-            inputs_embeds = torch.cat([soft_tokens, text_embeds], dim=1)
+            inputs_embeds = torch.cat([soft_tokens.to(text_embeds.dtype), text_embeds], dim=1)
 
             out_ids = self.model.generate(
                 inputs_embeds=inputs_embeds,
