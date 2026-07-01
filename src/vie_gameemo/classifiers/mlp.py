@@ -7,6 +7,7 @@ Output: logits of shape (B, n_classes).
 """
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 
@@ -18,7 +19,9 @@ class EmotionClassifier(nn.Module):
         hidden_dim: Intermediate dim.
         n_classes: Number of emotion classes.
         dropout: Dropout probability.
-        pool: 'mean' | 'max' | 'cls' (uses first token).
+        pool: 'mean' | 'max' | 'cls' | 'attention'.
+            'attention' learns a query vector that weights each token before
+            aggregation, allowing the model to focus on emotionally peak frames.
     """
 
     def __init__(
@@ -31,6 +34,10 @@ class EmotionClassifier(nn.Module):
     ) -> None:
         super().__init__()
         self.pool = pool
+        self._d_model = d_model
+        if pool == "attention":
+            self.attn_q = nn.Parameter(torch.zeros(1, 1, d_model))
+            nn.init.normal_(self.attn_q, std=0.02)
         self.net = nn.Sequential(
             nn.Linear(d_model, hidden_dim),
             nn.GELU(),
@@ -58,6 +65,12 @@ class EmotionClassifier(nn.Module):
                 h, _ = u_fusion.max(dim=1)
             elif self.pool == "cls":
                 h = u_fusion[:, 0, :]
+            elif self.pool == "attention":
+                B, T, D = u_fusion.shape
+                q = self.attn_q.expand(B, 1, D)                      # (B, 1, D)
+                scores = (q @ u_fusion.transpose(1, 2)) * (D ** -0.5)  # (B, 1, T)
+                weights = F.softmax(scores, dim=-1)                   # (B, 1, T)
+                h = (weights @ u_fusion).squeeze(1)                   # (B, D)
             else:
                 raise ValueError(f"Unknown pool: {self.pool!r}")
         else:

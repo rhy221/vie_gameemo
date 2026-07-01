@@ -256,9 +256,10 @@ labeling:
 # -----------------------------------------------------------------------------
 audio_encoder:
   type: "whisper"   # "whisper" | "ast" | "wav2vec2" | "hubert" (for ablation)
-  model_name: "openai/whisper-small"   # 768d, matches fusion d_model
+  model_name: "openai/whisper-large-v3"   # 1280d → Linear(1280→768) projection applied automatically
+  # model_name: "openai/whisper-small"   # 768d, no projection needed (faster, weaker)
   target_tokens: 64        # adaptive pool to this length
-  d_out: 768               # output dim (projection if model hidden != 768)
+  d_out: 768               # output dim (projection applied if model hidden_dim != d_out)
 
 # -----------------------------------------------------------------------------
 # STAGE 2b: Visual Dual-Path Encoder (Section 5 of spec — DOMAIN ADAPTED)
@@ -298,22 +299,42 @@ visual_encoder:
       global:
         source: "middle_frame"   # heuristic: peak emotion often mid-clip
       temporal:
-        n_frames: 16             # sweet spot per spec ablation
-        spatial_pool: [4, 4]     # 4x4 → 16 patch tokens from peak frame
-        pool_method: "attention" # "mean" | "max" | "attention"
+        n_frames: 16                    # sweet spot per paper ablation (Fig 3b)
+        spatial_pool: [4, 4]            # peak frame global patches: 4×4 → 16 tokens
+        temporal_spatial_pool: [2, 2]   # per-frame temporal patches: 2×2 → 4 tokens/frame × 16 = 64 tokens (paper default)
+        pool_method: "attention"        # "mean" | "max" | "attention"
+        use_temporal_3d_pool: false     # true = coherent 3D pool (T,H,W); false = per-frame 2D pool (default)
+        temporal_3d_pool: [4, 4, 4]    # (T', H', W') when use_temporal_3d_pool=true — T'*H'*W' should equal 64
 
   # Path 2: context encoder (webcam region — body language, posture, background)
   # Set type to "pose" to switch to pose-kinematics branch; keep "vit_imagenet" for ablation.
   context_encoder:
-    type: "vit_imagenet"          # "vit_imagenet" | "pose"
+    type: "vit_imagenet"          # "vit_imagenet" | "eva02_b" | "pose"
 
     # --- vit_imagenet branch (baseline/ablation) ---
     model_name: "google/vit-base-patch16-224"   # ImageNet pretrain
     n_frames: 16
     target_size: [224, 224]
-    spatial_pool: [2, 2]     # 2x2 → 4 patch tokens from peak frame
-    pool_method: "mean"      # "mean" | "max" | "attention"
-    # temporal_pool is deprecated: tri-view always keeps per-frame CLS tokens
+    spatial_pool: [2, 2]              # peak frame global patches: 2×2 → 4 tokens
+    temporal_spatial_pool: [2, 2]     # per-frame temporal patches: 2×2 → 4 tokens/frame × 16 = 64 tokens (paper default)
+    pool_method: "mean"               # "mean" | "max" | "attention"
+    use_temporal_3d_pool: false       # true = coherent 3D pool (T,H,W); false = per-frame 2D pool (default)
+    temporal_3d_pool: [4, 4, 4]      # (T', H', W') when use_temporal_3d_pool=true — T'*H'*W' should equal 64
+    # temporal_pool is deprecated: tri-view always uses spatially-pooled patches per frame
+
+    # --- eva02_b branch (richer features, requires: pip install timm) ---
+    # EVA-02-B: ViT-B/14 with RoPE + SwiGLU, pretrained on ImageNet-22k via MIM.
+    # 224×224 → 256 patches (16×16 grid) vs ViT-B/16's 196 (14×14).
+    # Output shape identical to vit_imagenet: (B, 69, 768).
+    eva02_b:
+      model_name: "eva02_base_patch14_224.mim_in22k"
+      n_frames: 16
+      target_size: [224, 224]
+      spatial_pool: [2, 2]              # 4 global patch tokens from peak frame
+      temporal_spatial_pool: [2, 2]     # 64 temporal tokens (4/frame × 16)
+      pool_method: "mean"               # "mean" | "max" | "attention"
+      use_temporal_3d_pool: false       # true = coherent 3D pool (T,H,W)
+      temporal_3d_pool: [4, 4, 4]      # (T', H', W') when use_temporal_3d_pool=true
 
     # --- pose branch (new) ---
     pose_backend: "mediapipe"     # "mediapipe" | "mmpose"
@@ -364,7 +385,8 @@ text_encoder:
 fusion:
   type: "conv_attention_4m"   # "late" | "early" | "mult" | "q_former" | "conv_only" | "attn_only" | "conv_attention_4m"
 
-  d_model: 768                 # shared fused channel dim after per-modality MLPs
+  d_model: 768
+  compress_dim: 128            # per-modality compression before concat (768→128); reduces conv input 3072→512
   n_modalities: 4              # audio + face + context + text
   # Raw text-encoder output dim before standardization. CafeBERT / xlmr-large
   # emit 1024; set to 768 (or remove) if using xlmr-base / a 768-dim backend.
@@ -393,6 +415,7 @@ classifier:
   dropout: 0.3
   activation: "gelu"
   n_classes: 8                 # match labeling.primary_schema (gaming_8)
+  pool: "attention"            # "mean" | "max" | "cls" | "attention" (learns per-token weights)
 
   loss:
     type: "focal"              # "ce" | "weighted_ce" | "focal"

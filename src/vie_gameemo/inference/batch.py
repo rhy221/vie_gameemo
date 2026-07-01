@@ -116,6 +116,7 @@ def _load_model(checkpoint: Path, cfg: SimpleNamespace, device: torch.device):
     fusion = get_fusion(
         fcfg.type,
         d_model=fcfg.d_model,
+        compress_dim=getattr(fcfg, "compress_dim", 128),
         n_modalities=fcfg.n_modalities,
         n_conv_blocks=getattr(fcfg, "n_conv_blocks", 4),
         kernel_size=getattr(fcfg, "kernel_size", 3),
@@ -127,6 +128,7 @@ def _load_model(checkpoint: Path, cfg: SimpleNamespace, device: torch.device):
         hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes,
         dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
 
     load_checkpoint(checkpoint, fusion, classifier)

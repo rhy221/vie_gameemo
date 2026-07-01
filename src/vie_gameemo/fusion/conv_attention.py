@@ -135,7 +135,10 @@ class ConvAttention4M(nn.Module):
     """Conv-Attention pre-fusion for 4 modalities (audio + face + context + text).
 
     Args:
-        d_model: Per-modality hidden dim after standardization (768).
+        d_model: Per-modality hidden dim (768 for our encoders).
+        compress_dim: Internal dim after per-modality compression. Reduces conv
+            input from d_model*n_modalities (3072) to compress_dim*n_modalities
+            (512 at default 128), cutting parameter count ~6×.
         n_modalities: 4 (audio, face, context, text).
         n_conv_blocks: Number of residual conv blocks in conv branch.
         kernel_size: Conv1d kernel size.
@@ -154,6 +157,7 @@ class ConvAttention4M(nn.Module):
     def __init__(
         self,
         d_model: int = 768,
+        compress_dim: int = 128,
         n_modalities: int = 4,
         n_conv_blocks: int = 4,
         kernel_size: int = 3,
@@ -166,21 +170,21 @@ class ConvAttention4M(nn.Module):
     ) -> None:
         super().__init__()
         self.d_model = d_model
+        self.compress_dim = compress_dim
         self.n_modalities = n_modalities
         self.align_to = align_to
         self.return_attention = return_attention
 
-        # MLP standardizers per modality: project each encoder's native output
-        # dim down to the shared d_model. Only text differs (1024) by default.
-        self.mlp_audio = nn.Linear(audio_dim or d_model, d_model)
-        self.mlp_face = nn.Linear(face_dim or d_model, d_model)
-        self.mlp_context = nn.Linear(context_dim or d_model, d_model)
-        self.mlp_text = nn.Linear(text_dim or d_model, d_model)
+        # Per-modality compression: d_model → compress_dim (e.g. 768 → 128)
+        self.mlp_audio = nn.Linear(d_model, compress_dim)
+        self.mlp_face = nn.Linear(d_model, compress_dim)
+        self.mlp_context = nn.Linear(d_model, compress_dim)
+        self.mlp_text = nn.Linear(d_model, compress_dim)
 
-        in_dim = d_model * n_modalities
+        in_dim = compress_dim * n_modalities  # 512 (was d_model*n_modalities = 3072)
         self.conv_branch = ConvBranch(
             in_dim=in_dim,
-            hidden_dim=d_model,
+            hidden_dim=compress_dim,
             n_blocks=n_conv_blocks,
             kernel_size=kernel_size,
         )
@@ -188,6 +192,8 @@ class ConvAttention4M(nn.Module):
             in_dim=in_dim,
             n_modalities=n_modalities,
         )
+        # Expand compressed fused repr back to d_model for downstream compat
+        self.fc_out = nn.Linear(compress_dim, d_model)
 
     def forward(
         self,
@@ -243,7 +249,7 @@ class ConvAttention4M(nn.Module):
         F_conv = self.conv_branch(F_d)                           # (B, T, D)
         F_attn, attn_weights = self.attn_branch(F_d, F_s)       # (B, T, D), (B, T, 4)
 
-        u_fusion = F_conv + F_attn                               # (B, T, D)
+        u_fusion = self.fc_out(F_conv + F_attn)                  # (B, T, d_model)
 
         if self.return_attention:
             return u_fusion, attn_weights

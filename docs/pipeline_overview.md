@@ -29,9 +29,9 @@ VIDEO CLIP (~5s)
 │
 ├─── AUDIO (wav) ──────── AST Encoder ──────── (B, 64, 768)  ─┐
 │                                                              │
-├─── FACE CROP (frames) ── FaceViT Encoder ──── (B, 33, 768) ──┤  (16 spatial + 1 global + 16 temporal)
+├─── FACE CROP (frames) ── FaceViT Encoder ──── (B, 81, 768) ──┤  (16 global patches + 1 global CLS + 64 temporal patches)
 │                                                              ├── Conv-Attention 4M ── (B, T, 768) ── MLP Head ── logits (B, 8)
-├─── FULL FRAME (frames) ─ ContextViT Encoder ─ (B, 21, 768) ──┤  (4 spatial + 1 global + 16 temporal)               │
+├─── FULL FRAME (frames) ─ ContextViT Encoder ─ (B, 69, 768) ──┤  (4 global patches + 1 global CLS + 64 temporal patches)               │
 │                                                              │                                              argmax → nhãn
 └─── TRANSCRIPT (text) ─── XLM-R/PhoBERT ──── (B, 1, 768)  ─┘
                                                               │
@@ -254,15 +254,15 @@ ViT pre-train trên **AffectNet** (1M ảnh khuôn mặt có nhãn cảm xúc). 
 face crops (N frames)
     ├── Spatial view:  peak (middle) frame → patch tokens → spatial pool (4×4) → 16 tokens
     ├── Global view:   peak frame → CLS token                                  →  1 token
-    └── Temporal view: 16 evenly-sampled frames, each CLS token kept           → 16 tokens
+    └── Temporal view: 16 evenly-sampled frames, each spatially pooled (2×2)   → 64 tokens (4/frame × 16)
                                                                                  ─────────
-                                           concat [patches | global_CLS | temporal_CLS] → (1, 33, 768)
+                          concat [global_patches | global_CLS | temporal_patches_flat] → (1, 81, 768)
 ```
 
 **Ba view bổ sung nhau:**
 - **Spatial patches:** Chi tiết cục bộ (micro-expression: nếp nhăn khóe miệng, nâng mày)
 - **Global CLS:** Tổng quan biểu cảm tại khoảnh khắc đỉnh cảm xúc
-- **Temporal CLS:** Chuỗi thời gian — cười → hét → cười trong 5 giây
+- **Temporal patches:** Chuỗi thời gian — cười → hét → cười trong 5 giây, với 4 spatial token/frame giữ lại thông tin vị trí (richer than CLS-only)
 
 **pool_method** cho spatial patches: `"mean"` (avg pool), `"max"` (max pool), `"attention"` (CLS-guided weighted pool — highlight vùng liên quan cảm xúc không cần extra parameters).
 
@@ -280,15 +280,15 @@ ViT standard được pre-train trên ImageNet-21k. Xử lý webcam region crop 
 webcam/full frames (N frames)
     ├── Spatial view:  peak (middle) frame → patch tokens → spatial pool (2×2) →  4 tokens
     ├── Global view:   peak frame → CLS token                                  →  1 token
-    └── Temporal view: 16 evenly-sampled frames, each CLS token kept           → 16 tokens
+    └── Temporal view: 16 evenly-sampled frames, each spatially pooled (2×2)   → 64 tokens (4/frame × 16)
                                                                                  ─────────
-                                           concat [patches | global_CLS | temporal_CLS] → (1, 21, 768)
+                          concat [global_patches | global_CLS | temporal_patches_flat] → (1, 69, 768)
 ```
 
 **Tại sao tri-view cho context?**
 - **Spatial patches:** Chi tiết UI cục bộ (kill feed góc trên, health bar dưới) không visible trong CLS
 - **Global CLS:** Scene semantics tổng thể (combat vs menu vs cutscene)
-- **Temporal CLS:** Thay đổi cảnh theo thời gian (calm → sudden combat → aftermath) — không bị mất khi mean-pool
+- **Temporal patches:** Thay đổi cảnh theo thời gian (calm → sudden combat → aftermath) với 4 spatial token/frame — richer than CLS-only, giữ được vị trí không gian
 
 ---
 
@@ -359,20 +359,21 @@ AST xử lý spectrogram bằng cách chia thành các patch nhỏ theo trục t
 
 Giữ T=64 (không pool thành 1) vì cảm xúc audio thay đổi theo thời gian: giây đầu im lặng, giây thứ 3 hét to → thông tin temporal quan trọng.
 
-**Face — T = 33** (với spatial_pool=(4,4), n_temporal=16)
+**Face — T = 81** (với spatial_pool=(4,4), temporal_spatial_pool=(2,2), n_temporal=16)
 
-Tri-view FaceEncoder giữ nguyên 3 loại token: 16 patch tokens (spatial) + 1 CLS (global) + 16 CLS (temporal). Lý do giữ T=33 thay vì pool thành T=1:
-- **Spatial patches** (T=16): biểu cảm vi mô — nếp nhăn, cơ mắt — không thể hiện qua CLS đơn thuần
+Tri-view FaceEncoder giữ nguyên 3 loại token: 16 global patches (peak frame) + 1 CLS (global) + 64 temporal patches (4/frame × 16 frames). Lý do giữ T=81 thay vì pool thành T=1:
+- **Global patches** (T=16): biểu cảm vi mô — nếp nhăn, cơ mắt — không thể hiện qua CLS đơn thuần
 - **Global CLS** (T=1): biểu cảm tổng thể tại peak frame
-- **Temporal CLS** (T=16): diễn biến cảm xúc theo thời gian (chuỗi được Fusion Conv branch xử lý)
-- Fusion module aligns 33 → T_target=64 bằng interpolation
+- **Temporal patches** (T=64): diễn biến cảm xúc theo thời gian với spatial detail mỗi frame — theo đúng thiết kế paper (2×2 per frame)
+- Fusion module aligns 81 → T_target=64 bằng interpolation
 
-**Context — T = 21** (với spatial_pool=(2,2), n_temporal=16)
+**Context — T = 69** (với spatial_pool=(2,2), temporal_spatial_pool=(2,2), n_temporal=16)
 
-Tri-view ContextEncoder tương tự: 4 patch tokens (spatial) + 1 CLS (global) + 16 CLS (temporal). Lý do không dùng mean-pool-to-1 nữa:
-- Mean pool từ 16 CLS về 1 vector **mất toàn bộ thông tin temporal** — clip có thể bắt đầu bình yên rồi đột ngột combat, thông tin đó biến mất khi average
+Tri-view ContextEncoder tương tự: 4 global patches (peak frame) + 1 CLS (global) + 64 temporal patches (4/frame × 16 frames). Lý do không dùng CLS-only hay mean-pool:
+- Mean pool từ 16 CLS về 1 vector **mất toàn bộ thông tin temporal** — clip có thể bắt đầu bình yên rồi đột ngột combat
+- CLS-only temporal (16 tokens) thiếu spatial detail so với paper (64 tokens với 2×2/frame)
 - Spatial patches nắm chi tiết UI (kill feed, health bar) không visible trong CLS
-- Fusion handles T=21 → 64 giống như face và audio
+- Fusion handles T=69 → 64 giống như face và audio
 
 **Text — T = 1**
 
@@ -395,8 +396,8 @@ Mỗi số trong vector 768 chiều không có ý nghĩa riêng lẻ — đây l
 | Modality | Encoder | Output `(B, T, D)` | B | T | D |
 |----------|---------|-------------------|---|---|---|
 | Audio | AST | `(B, 64, 768)` | batch | 64 token thời gian (~78ms/token) | 768 features |
-| Face | ViT-FER | `(B, 33, 768)` | batch | 16 spatial patches + 1 global CLS + 16 temporal CLS | 768 features |
-| Context | ViT-B/16 | `(B, 21, 768)` | batch | 4 spatial patches + 1 global CLS + 16 temporal CLS | 768 features |
+| Face | ViT-FER | `(B, 81, 768)` | batch | 16 global patches + 1 global CLS + 64 temporal patches (4/frame × 16) | 768 features |
+| Context | ViT-B/16 | `(B, 69, 768)` | batch | 4 global patches + 1 global CLS + 64 temporal patches (4/frame × 16) | 768 features |
 | Text | XLM-R/PhoBERT | `(B, 1, 768)` | batch | 1 CLS token toàn câu | 768 features |
 
 > **Lưu ý ký hiệu:** Trong code, encoder trả về `(1, T, 768)` khi encode một clip đơn lẻ (B=1). Khi đọc từ file `.pt` và xếp thành batch, collate_fn gộp thành `(B, T, 768)`. Trong tài liệu spec, đôi khi ghi `(B, T, D)` với D=768 hiểu ngầm.
