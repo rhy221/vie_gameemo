@@ -340,13 +340,23 @@ class CueExtractor:
 
         logger.info("Precomputing cues for %d clips (context=%s)", len(clip_ids), self.context_encoder_type)
 
-        for cid in clip_ids:
+        try:
+            from tqdm import tqdm
+            it = tqdm(clip_ids, desc="precompute_cues", unit="clip", dynamic_ncols=True)
+        except ImportError:
+            it = clip_ids
+
+        n_done = 0
+        for cid in it:
             self._precompute_face_geo(cid, faces_dir)
             self._precompute_prosody(cid, audios_dir)
             if self.motion_extractor is not None:
                 self.motion_extractor.precompute(cid, frames_dir, backend=pose_backend)
+            n_done += 1
+            if n_done % 100 == 0:
+                logger.info("Cue precompute: %d/%d clips done", n_done, len(clip_ids))
 
-        logger.info("Cue precompute done")
+        logger.info("Cue precompute done (%d clips)", n_done)
 
     def _precompute_face_geo(self, clip_id: str, faces_dir: Path) -> None:
         out = self.face_geo_dir / f"{clip_id}.json"
