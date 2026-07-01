@@ -42,6 +42,10 @@ class ModalAdapter(nn.Module):
         d_modality: int = 768,
         d_llm: int = 4096,
         d_penult: int = 256,
+        text_dim: int | None = None,
+        audio_dim: int | None = None,
+        face_dim: int | None = None,
+        context_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.d_fusion = d_fusion
@@ -51,10 +55,10 @@ class ModalAdapter(nn.Module):
 
         self.proj_penult = nn.Linear(d_penult, d_llm)
         self.proj_fusion = nn.Linear(d_fusion, d_llm)
-        self.proj_audio = nn.Linear(d_modality, d_llm)
-        self.proj_face = nn.Linear(d_modality, d_llm)
-        self.proj_context = nn.Linear(d_modality, d_llm)
-        self.proj_text = nn.Linear(d_modality, d_llm)
+        self.proj_audio = nn.Linear(audio_dim or d_modality, d_llm)
+        self.proj_face = nn.Linear(face_dim or d_modality, d_llm)
+        self.proj_context = nn.Linear(context_dim or d_modality, d_llm)
+        self.proj_text = nn.Linear(text_dim or d_modality, d_llm)
 
     def forward(
         self,
@@ -146,20 +150,30 @@ class ModalAdapter(nn.Module):
         d_modality: int = 768,
         d_llm: int = 4096,
         d_penult: int = 256,
+        **modal_dims,
     ) -> "ModalAdapter":
-        """Load adapter weights from a cognition checkpoint.
+        """Load adapter weights from a checkpoint, auto-inferring per-modality dims.
 
-        Args:
-            ckpt_path: Path to checkpoint (must contain "llm_adapter" key).
-            d_fusion: Source fusion dim (must match checkpoint).
-            d_modality: Per-modality dim (must match checkpoint).
-            d_llm: Target LLM dim (must match checkpoint).
-            d_penult: MLP penultimate dim (must match checkpoint).
-
-        Returns:
-            Loaded ModalAdapter instance (on CPU).
+        Reads proj_<modal>.weight shapes from the saved state dict to reconstruct
+        the exact architecture (e.g. text_dim=1024 for CafeBERT). Explicit
+        kwargs in modal_dims (text_dim, audio_dim, face_dim, context_dim) override
+        the inferred values.
         """
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-        adapter = cls(d_fusion=d_fusion, d_modality=d_modality, d_llm=d_llm, d_penult=d_penult)
-        adapter.load_state_dict(ckpt["llm_adapter"], strict=False)
+        sd = ckpt.get("llm_adapter", ckpt)
+
+        # Infer per-modality input dims from saved proj weights: shape is (d_llm, in_dim)
+        inferred: dict[str, int] = {}
+        for modal in ("text", "audio", "face", "context"):
+            key = f"{modal}_dim"
+            if key not in modal_dims:
+                w = sd.get(f"proj_{modal}.weight")
+                if w is not None:
+                    inferred[key] = w.shape[1]
+
+        adapter = cls(
+            d_fusion=d_fusion, d_modality=d_modality, d_llm=d_llm, d_penult=d_penult,
+            **{**inferred, **modal_dims},
+        )
+        adapter.load_state_dict(sd, strict=False)
         return adapter

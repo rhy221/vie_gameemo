@@ -241,6 +241,7 @@ def train_llm1_stage_a(
     adapter = ModalAdapter(
         d_fusion=fcfg.d_model, d_llm=llm_hidden,
         d_penult=ccfg.hidden_dim,
+        **modality_dim_kwargs(fcfg),
     ).to(device)
 
     g_head_cfg = tcfg.g_head
@@ -409,6 +410,7 @@ def train_llm1_stage_b(
     adapter = ModalAdapter(
         d_fusion=fcfg.d_model, d_llm=llm_hidden,
         d_penult=ccfg.hidden_dim,
+        **modality_dim_kwargs(fcfg),
     ).to(device)
 
     g_head_cfg = tcfg.g_head
