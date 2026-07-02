@@ -767,6 +767,7 @@ def _eval_agreement(
     import re
 
     adapter.eval()
+    llm.eval()
     total = 0
     n_agree = 0
     n_format = 0
@@ -837,6 +838,7 @@ def _eval_agreement(
                 total += 1
 
     adapter.train()
+    llm.train()
 
     return {
         "agreement": n_agree / max(1, total),
