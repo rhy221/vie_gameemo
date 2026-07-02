@@ -144,7 +144,9 @@ def train_llm_perception(
         n_classes=ccfg.n_classes, dropout=ccfg.dropout,
     ).to(device)
 
-    ckpt = torch.load(perception_checkpoint, map_location="cpu")
+    import sys, types
+    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
+    ckpt = torch.load(perception_checkpoint, map_location="cpu", weights_only=False)
     fusion.load_state_dict(ckpt["fusion_state_dict"])
     classifier.load_state_dict(ckpt["classifier_state_dict"])
 
@@ -545,12 +547,14 @@ def train_cognition(
         dropout=ccfg.dropout,
     ).to(device)
 
-    fusion_ckpt = torch.load(fusion_source, map_location="cpu")
+    import sys, types
+    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
+    fusion_ckpt = torch.load(fusion_source, map_location="cpu", weights_only=False)
     fusion.load_state_dict(fusion_ckpt["fusion_state_dict"])
     logger.info("Loaded fusion from %s", fusion_source)
 
     # Classifier always from Stage 1 perception
-    cls_ckpt = torch.load(perception_checkpoint, map_location="cpu")
+    cls_ckpt = torch.load(perception_checkpoint, map_location="cpu", weights_only=False)
     classifier.load_state_dict(cls_ckpt["classifier_state_dict"])
 
     # Freeze fusion + classifier (frozen in cognition per skeleton spec)
@@ -592,7 +596,7 @@ def train_cognition(
 
     # If Stage 2a checkpoint exists, warm-start adapter + LoRA from it
     if llm_perception_checkpoint and Path(llm_perception_checkpoint).exists():
-        lp_ckpt = torch.load(llm_perception_checkpoint, map_location="cpu")
+        lp_ckpt = torch.load(llm_perception_checkpoint, map_location="cpu", weights_only=False)
         if "llm_adapter" in lp_ckpt:
             llm_adapter.load_state_dict(lp_ckpt["llm_adapter"], strict=False)
             logger.info("Loaded ModalAdapter from Stage 2a: %s", llm_perception_checkpoint)
