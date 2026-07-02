@@ -542,7 +542,7 @@ training:
       target_modules: ["q_proj", "v_proj"]
     loss:
       lambda_kl: 0.1        # KL distillation from MLP confidence (0 to disable)
-      lambda_rec: 0.1        # g_head reconstruction loss (0 to disable)
+      lambda_rec: 1.0        # g_head reconstruction loss (0 to disable)
       kl_temperature: 2.0
     g_head:
       hidden_dim: 128

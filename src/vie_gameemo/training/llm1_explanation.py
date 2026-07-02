@@ -662,8 +662,19 @@ def _compute_loss(
         else:
             text_attrs = attr_tensor[:, 8:12]
 
+        # Face L_rec: only for samples where a face was actually detected.
+        # Clips without webcam have face_attrs=[0]*5, which would pull face_head
+        # toward zero and cause collapse. Mask them out entirely.
+        face_mask = has_face.float()  # (B,) 1=has_face 0=no_face
+        if face_mask.sum() > 0:
+            fp_masked = face_pred[face_mask.bool()]
+            fa_masked = face_attrs[face_mask.bool()]
+            loss_face = F.smooth_l1_loss(fp_masked, fa_masked)
+        else:
+            loss_face = face_pred.sum() * 0.0  # no-op but keeps graph
+
         loss_rec = (
-            F.smooth_l1_loss(face_pred, face_attrs)
+            loss_face
             + F.smooth_l1_loss(voice_pred, voice_attrs)
             + F.smooth_l1_loss(text_pred, text_attrs)
         )
