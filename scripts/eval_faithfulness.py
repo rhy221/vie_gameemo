@@ -73,6 +73,7 @@ def main() -> int:
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
+        skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
     ).to(device)
     classifier = EmotionClassifier(
         d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,

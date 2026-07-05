@@ -117,6 +117,7 @@ def _run_eval(cfg, args) -> dict:
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
+        skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
         **dim_kwargs,
     ).to(device)
     classifier = EmotionClassifier(
@@ -304,7 +305,9 @@ def _run_fusion_ablation(cfg, output_dir: Path) -> dict:
             fcfg = sub_cfg.fusion
             ccfg = sub_cfg.classifier
             fusion_m = get_fusion(fusion_type, d_model=fcfg.d_model, n_modalities=fcfg.n_modalities,
-                                  return_attention=False, **modality_dim_kwargs(fcfg)).to(device)
+                                  return_attention=False,
+                                  skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
+                                  **modality_dim_kwargs(fcfg)).to(device)
             cls_m = EmotionClassifier(fcfg.d_model, ccfg.hidden_dim, ccfg.n_classes, ccfg.dropout,
                                        pool=getattr(ccfg, "pool", "mean")).to(device)
             load_checkpoint(ckpt, fusion_m, cls_m)
