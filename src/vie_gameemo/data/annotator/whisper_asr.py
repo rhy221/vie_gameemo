@@ -159,7 +159,12 @@ class WhisperASR:
             audio_path: Path to wav file.
             source_language: Ground-truth language from video metadata ("vi"/"en").
             routing: "metadata" | "auto" | "force".
-            lang_prob_threshold: Threshold for auto routing confidence.
+            lang_prob_threshold: Below this, the initial pass's language pick
+                is treated as unreliable (ambiguous/near-silent/noisy audio)
+                even if it already landed inside the known candidate set —
+                re-transcribing pinned to a concrete language + initial_prompt
+                stabilizes decoding and reduces hallucination risk vs. letting
+                Whisper decode under an uncertain language.
 
         Returns:
             TranscriptionResult with text and language metadata.
@@ -188,15 +193,43 @@ class WhisperASR:
 
         segments, info = self.model.transcribe(str(audio_path), **transcribe_kwargs)
 
-        if routing == "auto" and info.language_probability < lang_prob_threshold:
-            logger.debug(
-                "Auto-detect confidence %.2f below threshold %.2f; falling back to vi",
-                info.language_probability, lang_prob_threshold,
+        if routing == "auto":
+            # Whisper's open-set LID (~99 languages) is unreliable on short
+            # (~5s) game-audio clips with background music/SFX, and can
+            # confidently (>0.6) misdetect e.g. ko/zh even though this
+            # dataset only ever contains the languages in `self.lang_configs`
+            # (vi/en). Restrict the decision to those candidates using the
+            # per-language probabilities Whisper already computed, instead of
+            # trusting its unrestricted top-1 guess.
+            candidates = tuple(self.lang_configs.keys())
+            restricted_lang = info.language
+            if info.all_language_probs:
+                probs = dict(info.all_language_probs)
+                restricted_lang = max(candidates, key=lambda l: probs.get(l, 0.0))
+            elif restricted_lang not in candidates:
+                restricted_lang = candidates[0]
+
+            # Redo (pinned to a concrete language) if either: the open-set
+            # top-1 landed outside the known candidates (wrong-language
+            # case), OR confidence was low even though it stayed inside the
+            # candidates (ambiguous/near-silent audio — forcing a language +
+            # initial_prompt here stabilizes decoding and curbs hallucination,
+            # same intent as the old flat confidence-threshold fallback).
+            needs_redo = (
+                restricted_lang != info.language
+                or info.language_probability < lang_prob_threshold
             )
-            lang_cfg = self.lang_configs.get("vi", _LANG_CONFIGS["vi"])
-            transcribe_kwargs["language"] = "vi"
-            transcribe_kwargs["initial_prompt"] = lang_cfg.get("initial_prompt", _GAMING_PROMPT_VI)
-            segments, info = self.model.transcribe(str(audio_path), **transcribe_kwargs)
+            if needs_redo:
+                logger.info(
+                    "Restricting LID for %s: open-set detected '%s' (p=%.2f) "
+                    "-> forcing '%s' (dataset only contains %s)",
+                    audio_path.name, info.language, info.language_probability,
+                    restricted_lang, candidates,
+                )
+                lang_cfg = self.lang_configs.get(restricted_lang, _LANG_CONFIGS.get(restricted_lang, _LANG_CONFIGS["vi"]))
+                transcribe_kwargs["language"] = restricted_lang
+                transcribe_kwargs["initial_prompt"] = lang_cfg.get("initial_prompt")
+                segments, info = self.model.transcribe(str(audio_path), **transcribe_kwargs)
 
         parts = []
         for seg in segments:

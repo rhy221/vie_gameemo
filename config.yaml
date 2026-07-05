@@ -157,10 +157,19 @@ annotation:
   # ASR for transcript — chọn backend tại annotation.asr.backend
   asr:
     backend: "whisper"          # "whisper" | "phowhisper"
-    language_routing: "auto"      # auto (detect per clip) | metadata | force
+    # auto: per-clip Whisper LID, but restricted to whisper.vi/whisper.en
+    # (see WhisperASR.transcribe) since clips are short (~5s) and Whisper's
+    # full ~99-language open-set LID can confidently misdetect background
+    # game music/SFX as e.g. ko/zh. | metadata: force ann.source_language.
+    # | force: always force_language below.
+    language_routing: "auto"
     force_language: "vi"
     detect_for_validation: true   # always run detect for audit, NOT to override
-    lang_prob_threshold: 0.6      # only used when routing == auto
+    # Redo pinned to a concrete language if the pick's own confidence is
+    # below this, even when it already landed in {vi, en} — low confidence
+    # signals ambiguous/near-silent/noisy audio where forcing a language +
+    # initial_prompt curbs hallucination.
+    lang_prob_threshold: 0.6
 
     # fastText lid.176 cross-check on transcript output
     text_lid:
