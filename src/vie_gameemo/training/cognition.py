@@ -612,7 +612,7 @@ def train_cognition(
     else:
         logger.info("No Stage 2a checkpoint — starting ModalAdapter + LoRA from scratch")
 
-    cls_criterion = build_classification_criterion(ccfg.loss)
+    cls_criterion = build_classification_criterion(ccfg.loss).to(device)
 
     # Balanced sampler for cognition
     train_loader = _maybe_balanced_sampler(train_loader, cfg)

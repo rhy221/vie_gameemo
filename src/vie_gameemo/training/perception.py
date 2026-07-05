@@ -96,7 +96,7 @@ def train_perception(
         alpha = make_class_weights(all_train_labels, ccfg.n_classes, method=class_weight_method)
         logger.info("Using %s class weights: %s", class_weight_method, alpha)
 
-    criterion = build_classification_criterion(loss_cfg, alpha=alpha)
+    criterion = build_classification_criterion(loss_cfg, alpha=alpha).to(device)
 
     # Balanced batch sampler: oversample rare classes so each batch is balanced
     sampler_type = getattr(ccfg, "sampler", "none")
