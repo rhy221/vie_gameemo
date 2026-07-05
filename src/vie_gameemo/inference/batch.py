@@ -246,8 +246,8 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
         features["context"] = ctx_enc.encode_from_paths(frame_paths)
     del ctx_enc
 
-    from vie_gameemo.encoders.text_xlmr import XLMRTextEncoder
-    text_enc = XLMRTextEncoder()
+    from vie_gameemo.encoders.text_xlmr import build_text_encoder
+    text_enc = build_text_encoder(cfg.text_encoder).to(device)
     features["text"] = text_enc.encode("")
     del text_enc
 

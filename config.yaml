@@ -363,7 +363,7 @@ text_encoder:
   backend: "cafebert"   # cafebert (default) | xlmr-large | xlmr-base | xlm-emo | mE5-frozen | phobert
   model: "uitnlp/CafeBERT"
   warm_start: "none"     # "MilaNLProc/xlm-emo-t" to test emotion-pretrain transfer
-  freeze: false          # true for mE5-frozen baseline (cheap compute)
+  freeze: true          # true for mE5-frozen baseline (cheap compute)
   max_length: 128
   pooling: "cls"         # "cls" | "mean"
 
@@ -530,7 +530,7 @@ training:
 
     early_stopping:
       enabled: true
-      patience: 10
+      patience: 30
       monitor: "val_macro_f1"
       mode: "max"
 
