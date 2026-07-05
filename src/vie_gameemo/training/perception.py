@@ -84,6 +84,11 @@ def train_perception(
     class_weight_method = getattr(loss_cfg, "class_weights", "none")
     alpha = getattr(loss_cfg.focal, "alpha", 1.0)
 
+    logger.info(
+        "Classifier config: pool=%s, loss=%s, class_weights=%s",
+        getattr(ccfg, "pool", "mean"), loss_type, class_weight_method,
+    )
+
     all_train_labels = [item["label"] for item in train_loader.dataset.items]
 
     if class_weight_method != "none":
