@@ -145,6 +145,7 @@ def run_strategy_ablation(
             kernel_size=getattr(fcfg, "kernel_size", 3),
             align_to=getattr(fcfg, "align_to", "audio"),
             return_attention=False,
+            skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
             **modality_dim_kwargs(fcfg, features_dir=Path(strategy_cfg.paths.features)),
         ).to(device)
         classifier = EmotionClassifier(

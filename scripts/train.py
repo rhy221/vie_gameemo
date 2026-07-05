@@ -60,6 +60,16 @@ def parse_args() -> argparse.Namespace:
         "--fusion", type=str, default=None,
         help="Override fusion type (for ablation)",
     )
+    parser.add_argument(
+        "--skip-mlp-if-matched", action="store_true", default=None,
+        help=(
+            "Ablation: skip a modality's standardizer nn.Linear when its raw "
+            "dim already equals fusion.d_model, using nn.Identity() instead. "
+            "Only enables (no CLI way to force-disable); omit to use the "
+            "config value. Changes the fusion checkpoint shape for matched "
+            "modalities — don't mix with checkpoints trained without this flag."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -151,6 +161,8 @@ def _cli_overrides(args: argparse.Namespace) -> dict:
         overrides[f"training.{args.stage}.learning_rate.fusion"] = args.lr
     if args.fusion is not None:
         overrides["fusion.type"] = args.fusion
+    if args.skip_mlp_if_matched:
+        overrides["fusion.skip_mlp_if_matched"] = True
     return overrides
 
 

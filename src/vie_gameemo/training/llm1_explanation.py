@@ -206,6 +206,7 @@ def train_llm1_stage_a(
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
+        skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
         **_dim_kwargs,
     ).to(device)
     classifier = EmotionClassifier(
@@ -385,6 +386,7 @@ def train_llm1_stage_b(
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
+        skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
         **_dim_kwargs,
     ).to(device)
     classifier = EmotionClassifier(

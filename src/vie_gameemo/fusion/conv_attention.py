@@ -149,6 +149,15 @@ class ConvAttention4M(nn.Module):
         audio_dim: Raw audio-encoder output dim (defaults to d_model).
         face_dim: Raw face-encoder output dim (defaults to d_model).
         context_dim: Raw context-encoder output dim (defaults to d_model).
+        skip_mlp_if_matched: If True, replace a modality's standardizer MLP
+            with `nn.Identity()` when its raw dim already equals d_model
+            (e.g. context_dim=768=d_model), instead of a trainable
+            `nn.Linear(d_model, d_model)`. Default False keeps the Linear for
+            every modality (original behavior) — this is an ablation switch,
+            not a bugfix, since the Linear also acts as a modality-specific
+            adapter even when dims already match. Changing this flag changes
+            the fusion state_dict shape for any matched modality, so a
+            checkpoint trained with one setting will not load under the other.
     """
 
     def __init__(
@@ -163,6 +172,7 @@ class ConvAttention4M(nn.Module):
         audio_dim: int | None = None,
         face_dim: int | None = None,
         context_dim: int | None = None,
+        skip_mlp_if_matched: bool = False,
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -172,10 +182,16 @@ class ConvAttention4M(nn.Module):
 
         # MLP standardizers per modality: project each encoder's native output
         # dim down to the shared d_model. Only text differs (1024) by default.
-        self.mlp_audio = nn.Linear(audio_dim or d_model, d_model)
-        self.mlp_face = nn.Linear(face_dim or d_model, d_model)
-        self.mlp_context = nn.Linear(context_dim or d_model, d_model)
-        self.mlp_text = nn.Linear(text_dim or d_model, d_model)
+        def _standardizer(raw_dim: int | None) -> nn.Module:
+            resolved = raw_dim or d_model
+            if skip_mlp_if_matched and resolved == d_model:
+                return nn.Identity()
+            return nn.Linear(resolved, d_model)
+
+        self.mlp_audio = _standardizer(audio_dim)
+        self.mlp_face = _standardizer(face_dim)
+        self.mlp_context = _standardizer(context_dim)
+        self.mlp_text = _standardizer(text_dim)
 
         in_dim = d_model * n_modalities
         self.conv_branch = ConvBranch(

@@ -404,6 +404,14 @@ fusion:
   # Whisper sizes) doesn't require hand-syncing this value. Set explicitly
   # only to override auto-detection.
   audio_dim: null
+  # Ablation switch: if true, a modality whose raw dim already equals d_model
+  # (e.g. context_dim=768 for both vit and eva_vit_b backends) gets nn.Identity()
+  # instead of a trainable nn.Linear(d_model, d_model) standardizer. Default
+  # false = original behavior (every modality always gets a Linear, which also
+  # acts as a learned per-modality adapter even when dims already match).
+  # Changes the fusion state_dict shape for matched modalities — a checkpoint
+  # trained with one setting will NOT load under the other.
+  skip_mlp_if_matched: false
   n_conv_blocks: 4
   kernel_size: 3
   activation: "switch"         # x * sigmoid(x), Swish-like
