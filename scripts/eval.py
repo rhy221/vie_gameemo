@@ -124,6 +124,7 @@ def _run_eval(cfg, args) -> dict:
         hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes,
         dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
     load_checkpoint(args.checkpoint, fusion, classifier)
     fusion.eval()
@@ -304,7 +305,8 @@ def _run_fusion_ablation(cfg, output_dir: Path) -> dict:
             ccfg = sub_cfg.classifier
             fusion_m = get_fusion(fusion_type, d_model=fcfg.d_model, n_modalities=fcfg.n_modalities,
                                   return_attention=False, **modality_dim_kwargs(fcfg)).to(device)
-            cls_m = EmotionClassifier(fcfg.d_model, ccfg.hidden_dim, ccfg.n_classes, ccfg.dropout).to(device)
+            cls_m = EmotionClassifier(fcfg.d_model, ccfg.hidden_dim, ccfg.n_classes, ccfg.dropout,
+                                       pool=getattr(ccfg, "pool", "mean")).to(device)
             load_checkpoint(ckpt, fusion_m, cls_m)
             test_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "test",
                                         split_manifest=splits_path if splits_path.exists() else None)

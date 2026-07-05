@@ -77,6 +77,7 @@ def main() -> int:
     classifier = EmotionClassifier(
         d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes, dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
 
     p_ckpt = torch.load(args.perception_ckpt, map_location="cpu")
