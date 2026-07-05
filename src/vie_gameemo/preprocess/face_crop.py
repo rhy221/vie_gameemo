@@ -17,6 +17,11 @@ from vie_gameemo.preprocess.webcam_detector import WebcamBBox
 
 logger = logging.getLogger(__name__)
 
+# Cached MediaPipe detector for _tight_face_crop, reused across frames so we
+# don't spin up a new MediaPipe graph (and its internal thread pool) per call.
+_tight_crop_detector = None
+_tight_crop_use_task_api = False
+
 
 def extract_streamer_face(
     frame: np.ndarray,
@@ -189,28 +194,12 @@ def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> np.ndarray:
         Tighter face crop, or fallback if detection fails.
     """
     try:
-        import mediapipe as mp
         rgb = cv2.cvtColor(region, cv2.COLOR_BGR2RGB)
         h, w = region.shape[:2]
+        detector, use_task_api = _get_tight_crop_detector()
 
-        if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_detection"):
-            detector = mp.solutions.face_detection.FaceDetection(
-                min_detection_confidence=0.5, model_selection=0
-            )
-            results = detector.process(rgb)
-            if results.detections:
-                bb = results.detections[0].location_data.relative_bounding_box
-                x1 = max(0, int(bb.xmin * w))
-                y1 = max(0, int(bb.ymin * h))
-                x2 = min(w, int((bb.xmin + bb.width) * w))
-                y2 = min(h, int((bb.ymin + bb.height) * h))
-                if x2 > x1 and y2 > y1:
-                    return region[y1:y2, x1:x2]
-        else:
-            from vie_gameemo.preprocess.webcam_detector import (
-                _build_task_api_detector, _task_api_detect,
-            )
-            detector = _build_task_api_detector(0.5)
+        if use_task_api:
+            from vie_gameemo.preprocess.webcam_detector import _task_api_detect
             bboxes = _task_api_detect(detector, rgb)
             if bboxes:
                 bx, by, bw, bh = bboxes[0]
@@ -220,6 +209,43 @@ def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> np.ndarray:
                 y2 = min(h, int((by + bh) * h))
                 if x2 > x1 and y2 > y1:
                     return region[y1:y2, x1:x2]
+        else:
+            results = detector.process(rgb)
+            if results.detections:
+                bb = results.detections[0].location_data.relative_bounding_box
+                x1 = max(0, int(bb.xmin * w))
+                y1 = max(0, int(bb.ymin * h))
+                x2 = min(w, int((bb.xmin + bb.width) * w))
+                y2 = min(h, int((bb.ymin + bb.height) * h))
+                if x2 > x1 and y2 > y1:
+                    return region[y1:y2, x1:x2]
     except Exception as exc:
         logger.debug("Tight crop failed: %s", exc)
     return fallback
+
+
+def _get_tight_crop_detector():
+    """Lazily create and cache the MediaPipe face detector used for tight crops.
+
+    Returns:
+        (detector, use_task_api) tuple. Cached at module level so repeated
+        calls (one per frame) reuse the same MediaPipe graph instead of
+        spinning up a new one each time.
+    """
+    global _tight_crop_detector, _tight_crop_use_task_api
+    if _tight_crop_detector is not None:
+        return _tight_crop_detector, _tight_crop_use_task_api
+
+    import mediapipe as mp
+
+    if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_detection"):
+        _tight_crop_detector = mp.solutions.face_detection.FaceDetection(
+            min_detection_confidence=0.5, model_selection=0
+        )
+        _tight_crop_use_task_api = False
+    else:
+        from vie_gameemo.preprocess.webcam_detector import _build_task_api_detector
+        _tight_crop_detector = _build_task_api_detector(0.5)
+        _tight_crop_use_task_api = True
+
+    return _tight_crop_detector, _tight_crop_use_task_api

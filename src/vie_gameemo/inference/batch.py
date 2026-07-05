@@ -107,7 +107,7 @@ def batch_inference(
 def _load_model(checkpoint: Path, cfg: SimpleNamespace, device: torch.device):
     """Load fusion + classifier from perception checkpoint."""
     from vie_gameemo.classifiers.mlp import EmotionClassifier
-    from vie_gameemo.fusion import get_fusion
+    from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.perception import load_checkpoint
 
     fcfg = cfg.fusion
@@ -121,12 +121,14 @@ def _load_model(checkpoint: Path, cfg: SimpleNamespace, device: torch.device):
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=True,
+        **modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features)),
     ).to(device)
     classifier = EmotionClassifier(
         d_model=fcfg.d_model,
         hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes,
         dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
 
     load_checkpoint(checkpoint, fusion, classifier)
@@ -190,6 +192,8 @@ def _get_features(clip_path: Path, cfg: SimpleNamespace, use_cached: bool) -> di
 
 def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
     """Extract features from raw video using frozen encoders."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     from vie_gameemo.preprocess.demux import extract_audio, extract_frames
 
     tmp_dir = Path(cfg.paths.features) / "_tmp" / clip_path.stem
@@ -226,8 +230,8 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
 
     features: dict = {}
 
-    from vie_gameemo.encoders.audio_whisper import WhisperAudioEncoder
-    audio_enc = WhisperAudioEncoder()
+    from vie_gameemo.encoders import get_audio_encoder
+    audio_enc = get_audio_encoder(cfg, device=device)
     features["audio"] = audio_enc.encode(audio_path)
     del audio_enc
 

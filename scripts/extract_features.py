@@ -72,15 +72,23 @@ def _config_hash(cfg) -> str:
     """Compute a hash of the encoder config for cache invalidation."""
     ctx_cfg = cfg.visual_encoder.context_encoder
     ctx_type = getattr(ctx_cfg, "type", "vit_imagenet")
-    # Distinguish pose vs vit_imagenet; pose has no model_name
-    ctx_key = (
-        getattr(ctx_cfg, "model_name", "")
-        if ctx_type != "pose"
-        else f"pose:{getattr(ctx_cfg, 'pose_backend', 'mediapipe')}"
-    )
+    from vie_gameemo.encoders import resolve_audio_model_name, resolve_context_vit_model_name
+
+    # Distinguish pose vs vit_imagenet; pose has no model_name.
+    # For vit_imagenet, resolve via backend/models (not the flat model_name
+    # field alone) so switching context_encoder.backend (e.g. vit → eva_vit_b)
+    # invalidates the cache even if the flat model_name field is untouched.
+    if ctx_type == "pose":
+        ctx_key = f"pose:{getattr(ctx_cfg, 'pose_backend', 'mediapipe')}"
+    else:
+        ctx_backend = getattr(ctx_cfg, "backend", "vit")
+        ctx_key = f"{ctx_backend}:{resolve_context_vit_model_name(ctx_cfg, ctx_backend)}"
+
     relevant = {
-        "audio": cfg.audio_encoder.model_name,
+        "audio_type": getattr(cfg.audio_encoder, "type", "whisper"),
+        "audio": resolve_audio_model_name(cfg),
         "audio_tokens": cfg.audio_encoder.target_tokens,
+        "audio_d_out": getattr(cfg.audio_encoder, "d_out", None),
         "face": cfg.visual_encoder.face_encoder.model_name,
         "context": ctx_key,
         "text": getattr(cfg.text_encoder, "model", getattr(cfg.text_encoder, "model_name", "unknown")),
@@ -117,14 +125,9 @@ def main() -> int:
 
     video_index: dict[str, Path] = {}
     if "audio" in args.modalities:
-        from vie_gameemo.encoders.audio_whisper import WhisperAudioEncoder
-        logger.info("Loading audio encoder...")
-        encoders["audio"] = WhisperAudioEncoder(
-            model_name=cfg.audio_encoder.model_name,
-            target_tokens=cfg.audio_encoder.target_tokens,
-            sample_rate=cfg.preprocess.audio.sample_rate,
-            device=device,
-        )
+        from vie_gameemo.encoders import get_audio_encoder
+        logger.info("Loading audio encoder (type=%s)...", getattr(cfg.audio_encoder, "type", "whisper"))
+        encoders["audio"] = get_audio_encoder(cfg, device=device)
         videos_dir = args.videos_dir or Path(cfg.paths.raw_videos)
         video_index = _index_videos(videos_dir)
         logger.info("Indexed %d source videos for audio fallback (%s)",
@@ -207,7 +210,9 @@ def main() -> int:
                 features["audio"] = encoders["audio"].encode(source).squeeze(0)
             else:
                 logger.warning("No audio source (wav or video) for: %s", clip_id)
-                features["audio"] = torch.zeros(cfg.audio_encoder.target_tokens, 768)
+                features["audio"] = torch.zeros(
+                    cfg.audio_encoder.target_tokens, encoders["audio"].d_out
+                )
 
         import cv2
         import numpy as np

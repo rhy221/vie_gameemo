@@ -649,7 +649,7 @@ Có **4 chiến lược** (setup) với input và cơ chế khác nhau. Bảng s
 
 | Setup | Model | Training | Input nguồn | Nhãn đến từ đâu | Annotation-free? |
 |-------|-------|----------|------------|----------------|-----------------|
-| LLM-1 | Qwen2.5-7B | ❌ Không | Text features từ annotation | Classifier cho sẵn | ❌ |
+| LLM-1 | Qwen2.5-7B | ✅ Stage A (ModalAdapter + g_head) + Stage B LoRA (tùy chọn) | Cues từ CueExtractor **hoặc** fusion_emb | Classifier cho sẵn (explain only) | ✅ (cần `llm1_explanation_best.pt`) |
 | LLM-2 | Qwen2.5-7B | ✅ SFT (LoRA) + ModalAdapter | Text evidence **hoặc** fusion_emb | LLM tự predict | ✅ (cần cognition ckpt) |
 | LLM-3 | Qwen2.5-VL-7B | ✅ LoRA | Raw frames + audio | LLM tự predict | ✅ Luôn luôn |
 | LLM-4 | Qwen2.5-7B | ✅ SFT → GRPO + ModalAdapter | Text evidence **hoặc** fusion_emb | LLM tự predict | ✅ (cần cognition ckpt) |
@@ -715,51 +715,111 @@ llm:
 
 ---
 
-### LLM-1: Post-hoc Explainer (`llm/llm1_explainer.py`)
+### LLM-1: Faithful Explainer (`llm/llm1_explainer.py`, `training/llm1_explanation.py`)
 
-**Không train.** Dùng model off-the-shelf với prompt engineering.
+**Có training 2 stage** (script: `scripts/train_llm1.py`). LLM-1 là "Faithful Explainer" — nhận nhãn từ Classifier rồi giải thích tại sao, nhưng được ràng buộc bằng `g_head` để chỉ dùng bằng chứng thật sự có liên quan.
 
-**Nguồn input — từ hai nơi khác nhau:**
+#### Stage A — Alignment (ModalAdapter + g_head, LLM frozen)
+
+**Script:** `python scripts/train_llm1.py --stage a --resume-from perception_best.pt`
+
+Giai đoạn này train **hai module nhỏ**, toàn bộ LLM vẫn bị freeze:
+
+**1. ModalAdapter:** Project fusion embedding → LLM embedding space (768 → 4096)
+
+**2. g_head (attribution head):** MLP nhỏ reconstruct các thuộc tính diễn giải được từ `u_fusion`:
+
+```
+u_fusion (B, T, 768) → mean pool → g_head MLP → predicted_attrs (B, n_attrs)
+
+  context_encoder.type = "pose":         n_attrs = 15
+      face(5): smile, brow_raise, mouth_open, eye_close, head_nod
+      voice(3): pitch_level, energy_level, speech_rate
+      motion(3): motion_energy, impact_detected, periodicity
+      text(4):   sentiment, code_switch_ratio, exclamation_rate, game_term_rate
+
+  context_encoder.type = "vit_imagenet": n_attrs = 12
+      face(5) + voice(3) + text(4) — không có motion attrs
+```
+
+**CueExtractor** (`llm/cue_extractor.py`) precompute các attrs này từ raw data → làm supervision signal cho `g_head`. Chạy trước khi training:
+
+```
+python scripts/train_llm1.py --precompute-cues --config config.yaml
+```
+
+Hàm loss Stage A:
+```
+L_a = λ_kl * L_KL + λ_rec * L_rec
+
+  L_KL = KL(LLM_probs || Classifier_probs, temperature=2.0)
+           → KL distillation: LLM học bắt chước confidence của Classifier
+           → λ_kl = 0.1 (nhỏ, chỉ hỗ trợ)
+
+  L_rec = MSE(g_head(u_fusion), cue_attrs_gt)
+           → g_head học reconstruct các cues thực sự có mặt trong clip
+           → λ_rec = 1.0 (chính)
+```
+
+`L_rec` là "faithful" mechanism: g_head phải chứng minh embedding có chứa thông tin diễn giải được, không phải confabulate.
+
+#### Stage B — LoRA Fine-tune (tùy chọn)
+
+**Script:** `python scripts/train_llm1.py --stage b --stage-a-ckpt llm1_explanation_best.pt`
+
+Sau Stage A, nếu muốn cải thiện chất lượng văn bản reasoning, unlock LoRA (rank=4, alpha=8) trên LLM:
+
+```yaml
+# config.yaml
+training:
+  llm1_explanation:
+    run_stage_b: false   # ← đặt true để chạy Stage B sau Stage A
+    lora:
+      rank: 4
+      alpha: 8
+      target_modules: ["q_proj", "v_proj"]
+```
+
+Stage B chỉ khuyến nghị khi có nhiều data, vì rank=4 nhỏ để giảm overfitting.
+
+#### Inference LLM-1
 
 ```
 ┌─ Stage 4 output ───────────────────────────────────────────────────┐
 │  MLP Classifier → predicted label = "hype"                         │
-│  (đây là kết quả đã chạy qua AST→Fusion→Classifier)               │
 └────────────────────────────────────────────────────────────────────┘
          +
-┌─ Stage 0 output (Annotation JSON) ─────────────────────────────────┐
-│  face_aus:     {"AU12": 2.8, "AU25": 3.1, "AU4": 0.3, ...}        │  ← OpenFace
-│  transcript:   "BOOM! ACE rồi bro!"                                │  ← Whisper
-│  game_context: "Người chơi há miệng, tay giơ lên..."               │  ← Qwen-VL
-│  pitch_hz/rms_db/shout: prosody features                            │  ← Qwen-Audio
+┌─ g_head output (từ u_fusion) ──────────────────────────────────────┐
+│  smile=0.9, brow_raise=0.1, mouth_open=0.8                         │  ← face attrs
+│  pitch=high, energy=strong, speech_rate=fast                        │  ← voice attrs
+│  motion_energy=high, impact=moderate                                │  ← motion attrs (pose)
+│  sentiment=positive, exclamation=high                               │  ← text attrs
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-**Hai cách đưa thông tin vào LLM-1:**
-
-1. **Text evidence path** (khi có annotation): Stage 0 agent AI viết sẵn mô tả ngôn ngữ tự nhiên về âm thanh và hình ảnh → LLM đọc được trực tiếp.
-
-2. **Không có annotation**: LLM-1 không có fallback — vẫn cần text evidence. Chỉ LLM-2/4 mới hỗ trợ annotation-free qua ModalAdapter (xem phần Modal Adapter ở đầu section này).
-
-Prompt được build từ hai nguồn trên:
+Prompt được build từ g_head output (không phải raw annotation JSON):
 ```
 [USER]
   Nhãn classifier: hype
-  AU: AU12=2.8, AU25=3.1, AU4=0.3
-  Transcript: "BOOM! ACE rồi bro!"
-  Bối cảnh game: Người chơi há miệng, tay giơ lên...
-  Giọng nói: to, nhanh, hô lớn ở giây 3
-  → Hãy giải thích tại sao nhãn này đúng.
+  Khuôn mặt: miệng mở to (0.8), cười (0.9)
+  Giọng nói: cao (high), mạnh (strong), nhanh (fast)
+  Chuyển động: năng lượng cao, phát hiện impact
+  Văn bản: tích cực, nhiều dấu chấm than
+  → Hãy giải thích tại sao nhãn này phù hợp.
 ```
+
+**Khi không có checkpoint LLM-1** (`llm1.explanation_checkpoint: null`): fallback về zero-shot text-only prompt với annotation JSON text (nếu có) hoặc "N/A" evidence.
 
 **Output:**
 ```
-<think>AU12 cao → cười to. Transcript "ACE" xác nhận chiến thắng.
-Giọng to nhanh → hype.</think>
+<think>Miệng mở to và cười mạnh → hype reaction. Giọng cao mạnh nhanh
+→ phấn khích. Chuyển động mạnh → cử động hào hứng.</think>
 <answer>hype</answer>
 ```
 
-**Điểm yếu quan trọng:** LLM nhận nhãn từ classifier như sự thật đã cho trước → chỉ viết lý do bênh vực nhãn đó. Nếu classifier sai, LLM vẫn giải thích sai một cách tự tin. Đây là "post-hoc rationalization", không phải reasoning thật sự.
+**Tại sao "Faithful" hơn post-hoc?** LLM-1 không đọc annotation do AI tạo ra — nó dùng g_head attrs được reconstruct trực tiếp từ fusion embedding. g_head được train với `L_rec` để chỉ output attrs thực sự có trong embedding → giảm hallucination so với LLM đọc mô tả văn bản.
+
+**Điểm yếu còn lại:** Nhãn vẫn đến từ Classifier và LLM không được override. Nếu Classifier sai → explanation sai nhưng "faithful" với dữ liệu thô.
 
 ---
 
@@ -905,18 +965,19 @@ Parser (`LLM1Explainer.parse_output`) dùng regex trích xuất `<answer>` tag. 
 ### Tổng quan: Thành phần nào được train, thành phần nào bị freeze?
 
 ```
-┌─────────────────┬──────────────────────┬──────────────────────┬──────────────────────┐
-│ Thành phần      │ Stage 0 (annotation) │ Perception training  │ Cognition training   │
-├─────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
-│ AST (Audio)     │ FROZEN (pretrained)  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │
-│ FaceViT         │ FROZEN (pretrained)  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │
-│ ContextViT      │ FROZEN (pretrained)  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │
-│ XLM-R/PhoBERT   │ FROZEN (pretrained)  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │
-│ Fusion module   │ không dùng           │ ✅ TRAIN (LR=2e-4)   │ FROZEN               │
-│ MLP Classifier  │ không dùng           │ ✅ TRAIN (LR=2e-4)   │ FROZEN               │
-│ ModalAdapter    │ không dùng           │ không dùng           │ ✅ TRAIN (LR=2e-4)   │
-│ LLM (Qwen2.5)   │ FROZEN (inference)   │ không dùng           │ ✅ TRAIN LoRA (2e-5) │
-└─────────────────┴──────────────────────┴──────────────────────┴──────────────────────┘
+┌─────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┐
+│ Thành phần      │ Stage 0 (annotation) │ Perception training  │ Cognition training   │ LLM-1 Explanation    │
+├─────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
+│ AST (Audio)     │ FROZEN (pretrained)  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │
+│ FaceViT         │ FROZEN (pretrained)  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │
+│ ContextViT      │ FROZEN (pretrained)  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │
+│ XLM-R/PhoBERT   │ FROZEN (pretrained)  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │ FROZEN + cached .pt  │
+│ Fusion module   │ không dùng           │ ✅ TRAIN (LR=2e-4)   │ FROZEN               │ FROZEN               │
+│ MLP Classifier  │ không dùng           │ ✅ TRAIN (LR=2e-4)   │ FROZEN               │ FROZEN               │
+│ ModalAdapter    │ không dùng           │ không dùng           │ ✅ TRAIN (LR=2e-4)   │ ✅ TRAIN (LR=2e-4)   │
+│ g_head          │ không dùng           │ không dùng           │ không dùng           │ ✅ TRAIN (LR=2e-4)   │
+│ LLM (Qwen2.5)   │ FROZEN (inference)   │ không dùng           │ ✅ TRAIN LoRA (2e-5) │ FROZEN / LoRA opt.   │
+└─────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┘
 ```
 
 **Quy tắc chung:** Mỗi giai đoạn chỉ train phần mới thêm vào, giữ nguyên phần đã train trước. Lý do:
@@ -1192,6 +1253,9 @@ checkpoints/best_perception.pt ← fusion + classifier weights
     ▼ train.py --stage cognition (optional)
 checkpoints/best_cognition.pt ← LLM LoRA adapter weights
     │
+    ▼ train_llm1.py --stage a (optional: train Faithful Explainer)
+checkpoints/llm1_explanation_best.pt ← ModalAdapter + g_head weights
+    │
     ▼ eval.py / infer.py / demo.py
 kết quả dự đoán + reasoning
 ```
@@ -1273,8 +1337,10 @@ vie-gameemo-skeleton/
 │   ├── stage0_crawl.py
 │   ├── stage0_preprocess.py
 │   ├── stage0_annotate.py
+│   ├── transcribe.py           ← Whisper ASR batch transcription → cập nhật annotation JSON
 │   ├── extract_features.py
-│   ├── train.py
+│   ├── train.py                ← --stage perception | cognition
+│   ├── train_llm1.py           ← --stage a | b | both (Faithful Explainer)
 │   ├── train_rlvr.py
 │   ├── eval.py
 │   ├── infer.py
@@ -1307,3 +1373,5 @@ vie-gameemo-skeleton/
 | **Focal Loss** | Dataset mất cân bằng: neutral 20%, disgusted 7% → FL tập trung class khó |
 | **LoRA cho LLM** | Chỉ train ~1% param → tránh catastrophic forgetting, tiết kiệm VRAM |
 | **GRPO thay vì RLHF** | Reward verifiable (đúng/sai nhãn) → không cần reward model riêng |
+| **g_head (attribution head) cho LLM-1** | Ràng buộc LLM giải thích dựa trên attrs thực trong embedding → giảm hallucination so với text annotation |
+| **CueExtractor + 2-stage LLM-1** | Stage A align ModalAdapter+g_head (nhanh); Stage B LoRA tùy chọn để cải thiện fluency → tiết kiệm compute khi dataset nhỏ |

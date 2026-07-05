@@ -211,6 +211,7 @@ def train_llm1_stage_a(
     classifier = EmotionClassifier(
         d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes, dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
 
     fusion.load_state_dict(ckpt["fusion_state_dict"])
@@ -389,6 +390,7 @@ def train_llm1_stage_b(
     classifier = EmotionClassifier(
         d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes, dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
 
     fusion.load_state_dict(ckpt["fusion_state_dict"])
@@ -478,7 +480,10 @@ def train_llm1_stage_b(
     patience = getattr(tcfg.early_stopping, "patience", 5)
     no_improve = 0
 
-    logger.info("LLM-1 Stage B: %d epochs, LoRA rank=%d", n_epochs, lora_cfg.rank)
+    logger.info(
+        "LLM-1 Stage B: %d epochs, LoRA rank=%d, early_stopping_patience=%d",
+        n_epochs, lora_cfg.rank, patience,
+    )
 
     n_steps_per_epoch = len(train_loader)
     log_every = max(1, n_steps_per_epoch // 10)

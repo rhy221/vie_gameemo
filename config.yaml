@@ -256,9 +256,20 @@ labeling:
 # -----------------------------------------------------------------------------
 audio_encoder:
   type: "whisper"   # "whisper" | "ast" | "wav2vec2" | "hubert" (for ablation)
-  model_name: "openai/whisper-small"   # 768d, matches fusion d_model
   target_tokens: 64        # adaptive pool to this length
-  d_out: 768               # output dim (projection if model hidden != 768)
+  # d_out: leave unset (null) so the encoder outputs its native hidden size.
+  # Dimension standardization to fusion.d_model happens in the fusion model's
+  # own trainable per-modality MLP (see fusion.audio_dim below), not here —
+  # a projection added inside this frozen encoder would never be trained.
+  d_out: null
+  # One checkpoint per type, keyed by `type` above. Ablating across types is
+  # then just flipping `type` — no risk of leaving a stale checkpoint from a
+  # previous type in place (as would happen with a single flat model_name).
+  models:
+    whisper: "openai/whisper-small"                       # 768d
+    ast: "MIT/ast-finetuned-audioset-10-10-0.4593"          # 768d
+    wav2vec2: "facebook/wav2vec2-base"                      # 768d
+    hubert: "facebook/hubert-base-ls960"                    # 768d
 
 # -----------------------------------------------------------------------------
 # STAGE 2b: Visual Dual-Path Encoder (Section 5 of spec — DOMAIN ADAPTED)
@@ -268,7 +279,7 @@ visual_encoder:
 
   # Webcam region detection (separates streamer face from in-game NPC faces)
   webcam_detector:
-    backend: "owlv2"             # "mediapipe" | "owlv2" | "yolo"
+    backend: "yolo"             # "mediapipe" | "owlv2" | "yolo"
     min_detection_confidence: 0.1
     sample_n_frames: 30          # frames sampled to find stable region
     clustering:
@@ -308,7 +319,17 @@ visual_encoder:
     type: "vit_imagenet"          # "vit_imagenet" | "pose"
 
     # --- vit_imagenet branch (baseline/ablation) ---
-    model_name: "google/vit-base-patch16-224"   # ImageNet pretrain
+    backend: "vit"                # "vit" (default) | "eva_vit_b" (EVA ViT-B, needs `timm` installed)
+    model_name: "google/vit-base-patch16-224"   # ImageNet pretrain (used when backend="vit" and
+                                                 # `models.<backend>` below is unset)
+    # Per-backend checkpoint, keyed by `backend` above — flipping `backend` alone
+    # is then enough to ablate vit vs eva_vit_b (mirrors audio_encoder.models).
+    # Both output 768-d embeddings, same as d_model below, so no fusion changes
+    # are needed to swap between them; fusion.context_dim auto-infers from the
+    # cached feature shapes either way (see fusion.modality_dim_kwargs).
+    models:
+      vit: "google/vit-base-patch16-224"
+      eva_vit_b: "timm/eva02_base_patch14_224.mim_in22k_ft_in22k_in1k"   # EVA02-Base, 768d
     n_frames: 16
     target_size: [224, 224]
     temporal_pool: "mean"
@@ -367,6 +388,13 @@ fusion:
   # Raw text-encoder output dim before standardization. CafeBERT / xlmr-large
   # emit 1024; set to 768 (or remove) if using xlmr-base / a 768-dim backend.
   text_dim: 1024
+  # Raw audio-encoder output dim before standardization. Leave unset (null)
+  # to auto-infer from the cached feature shapes in paths.features (see
+  # modality_dim_kwargs) — this tracks audio_encoder.type/model_name
+  # automatically so switching between whisper/ast/wav2vec2/hubert (or
+  # Whisper sizes) doesn't require hand-syncing this value. Set explicitly
+  # only to override auto-detection.
+  audio_dim: null
   n_conv_blocks: 4
   kernel_size: 3
   activation: "switch"         # x * sigmoid(x), Swish-like
@@ -391,6 +419,7 @@ classifier:
   dropout: 0.3
   activation: "gelu"
   n_classes: 8                 # match labeling.primary_schema (gaming_8)
+  pool: "attention"            # "mean" | "max" | "cls" | "attention" (pool over T tokens of u_fusion)
 
   loss:
     type: "focal"              # "ce" | "weighted_ce" | "focal"
@@ -542,7 +571,7 @@ training:
       target_modules: ["q_proj", "v_proj"]
     loss:
       lambda_kl: 0.1        # KL distillation from MLP confidence (0 to disable)
-      lambda_rec: 1.0        # g_head reconstruction loss (0 to disable)
+      lambda_rec: 0.3        # g_head reconstruction loss (0 to disable)
       kl_temperature: 2.0
     g_head:
       hidden_dim: 128

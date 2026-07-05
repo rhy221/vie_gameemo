@@ -24,7 +24,7 @@ class TestEmotionClassifier:
         logits = clf(x)
         assert logits.shape == (B, N_CLASSES)
 
-    @pytest.mark.parametrize("pool", ["mean", "max", "cls"])
+    @pytest.mark.parametrize("pool", ["mean", "max", "cls", "attention"])
     def test_pool_modes(self, pool):
         clf = EmotionClassifier(d_model=D, hidden_dim=256, n_classes=N_CLASSES, pool=pool)
         x = torch.randn(B, T, D)

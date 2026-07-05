@@ -67,7 +67,7 @@ def train_perception(
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
-        **modality_dim_kwargs(fcfg),
+        **modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features)),
     ).to(device)
 
     classifier = EmotionClassifier(
@@ -75,6 +75,7 @@ def train_perception(
         hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes,
         dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
 
     # Class weights for focal/weighted_ce
@@ -156,7 +157,10 @@ def train_perception(
     early_stopping = getattr(pcfg, "early_stopping", None)
     patience = getattr(early_stopping, "patience", 5) if early_stopping else 999
 
-    logger.info("Perception training: %d epochs, %d steps/epoch", pcfg.epochs, len(train_loader))
+    logger.info(
+        "Perception training: %d epochs, %d steps/epoch, early_stopping_patience=%s",
+        pcfg.epochs, len(train_loader), patience if early_stopping else "disabled",
+    )
 
     for epoch in range(state.epoch, pcfg.epochs):
         state.epoch = epoch

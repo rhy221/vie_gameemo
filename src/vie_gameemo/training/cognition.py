@@ -123,7 +123,7 @@ def train_llm_perception(
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from vie_gameemo.classifiers.mlp import EmotionClassifier
-    from vie_gameemo.fusion import get_fusion
+    from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
 
     lp_cfg = getattr(cfg.training, "llm_perception", None) or cfg.training.cognition
     pcfg = cfg.training.perception
@@ -138,10 +138,12 @@ def train_llm_perception(
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
+        **modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features)),
     ).to(device)
     classifier = EmotionClassifier(
         d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes, dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
 
     import sys, types
@@ -517,7 +519,7 @@ def train_cognition(
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from vie_gameemo.classifiers.mlp import EmotionClassifier
-    from vie_gameemo.fusion import get_fusion
+    from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.losses import FocalLoss
 
     ccfg_train = cfg.training.cognition
@@ -539,12 +541,14 @@ def train_cognition(
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=False,
+        **modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features)),
     ).to(device)
     classifier = EmotionClassifier(
         d_model=fcfg.d_model,
         hidden_dim=ccfg.hidden_dim,
         n_classes=ccfg.n_classes,
         dropout=ccfg.dropout,
+        pool=getattr(ccfg, "pool", "mean"),
     ).to(device)
 
     import sys, types

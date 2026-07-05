@@ -12,8 +12,14 @@ Model variants and hidden sizes:
     - openai/whisper-medium: 1024d (769M)
     - openai/whisper-large-v3: 1280d (1.5B)
 
-Output: token sequence (B, target_tokens, d_out) where d_out = 768
-(standardized via linear projection if model hidden != 768).
+Output: token sequence (B, target_tokens, d_out) where d_out defaults to the
+model's native hidden size (self.d_out). Dimension standardization across
+model variants (or across whisper/ast/wav2vec2/hubert during ablation) is
+handled downstream by the fusion module's per-modality MLP (see
+`fusion.audio_dim` in config.yaml / `modality_dim_kwargs`), NOT here — that
+MLP is trained jointly with the rest of the model, whereas anything done
+inside this frozen, `@torch.no_grad()`-wrapped encoder never receives
+gradients. Only pass `d_out` explicitly if you understand this tradeoff.
 """
 
 import logging
@@ -35,7 +41,7 @@ class WhisperAudioEncoder(nn.Module):
         self,
         model_name: str = "openai/whisper-small",
         target_tokens: int = 64,
-        d_out: int = 768,
+        d_out: int | None = None,
         sample_rate: int = 16000,
         device: str | torch.device = "cuda",
     ) -> None:
@@ -44,14 +50,16 @@ class WhisperAudioEncoder(nn.Module):
         Args:
             model_name: HuggingFace Whisper model ID.
             target_tokens: Output sequence length after adaptive pooling.
-            d_out: Output embedding dim (768 to match fusion d_model).
+            d_out: If set and different from the model's native hidden size,
+                adds an (untrained, frozen-context) nn.Linear projection.
+                Leave as None (default) to output the native hidden size and
+                let `fusion.audio_dim` handle standardization instead.
             sample_rate: Input audio sample rate (must be 16kHz for Whisper).
             device: Torch device.
         """
         super().__init__()
         self.model_name = model_name
         self.target_tokens = target_tokens
-        self.d_out = d_out
         self.sample_rate = sample_rate
         self.device = torch.device(device)
 
@@ -68,14 +76,21 @@ class WhisperAudioEncoder(nn.Module):
         self.encoder = self.encoder.to(self.device)
 
         d_model = self.encoder.config.d_model
-        if d_model != d_out:
+        if d_out is not None and d_model != d_out:
             self.proj = nn.Linear(d_model, d_out)
             self.proj = self.proj.to(self.device)
-            logger.info("Added projection %d → %d", d_model, d_out)
+            logger.warning(
+                "Added UNTRAINED projection %d -> %d inside frozen encoder "
+                "(runs under @torch.no_grad during feature extraction, never "
+                "learned). Prefer d_out=None + fusion.audio_dim=%d so the "
+                "fusion model's own trainable MLP standardizes the dim.",
+                d_model, d_out, d_model,
+            )
         else:
             self.proj = None
 
-        logger.info("Whisper encoder loaded and frozen (d_model=%d)", d_model)
+        self.d_out = d_out if self.proj is not None else d_model
+        logger.info("Whisper encoder loaded and frozen (d_model=%d, d_out=%d)", d_model, self.d_out)
 
     @torch.no_grad()
     def encode(self, audio_path: Path) -> Tensor:
@@ -85,7 +100,7 @@ class WhisperAudioEncoder(nn.Module):
             audio_path: Path to wav file (16kHz, mono).
 
         Returns:
-            Tensor of shape (1, target_tokens, d_out).
+            Tensor of shape (1, target_tokens, self.d_out).
 
         Raises:
             FileNotFoundError: If audio_path missing.

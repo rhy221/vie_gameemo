@@ -67,6 +67,35 @@ def cache_features(
     return pt_path
 
 
+def infer_dim_from_cache(cache_dir: Path, modality: str) -> int | None:
+    """Infer a modality's feature dim from one cached clip's `.meta.json`.
+
+    Lets fusion pick up e.g. the audio dim automatically after switching
+    `audio_encoder.type`/`model_name`, instead of requiring the matching
+    `fusion.audio_dim` to be kept in sync by hand.
+
+    Args:
+        cache_dir: Feature cache directory (`cfg.paths.features`).
+        modality: Modality key as stored in `cache_features` shapes, e.g.
+            "audio", "face", "context", "text".
+
+    Returns:
+        Last-axis dim of the cached tensor, or None if no cache entry with
+        that modality's shape recorded is found.
+    """
+    if not cache_dir.exists():
+        return None
+    for meta_path in cache_dir.glob(f"*{_META_SUFFIX}"):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        shape = meta.get("shapes", {}).get(modality)
+        if shape:
+            return shape[-1]
+    return None
+
+
 def load_cached_features(
     clip_id: str,
     cache_dir: Path,

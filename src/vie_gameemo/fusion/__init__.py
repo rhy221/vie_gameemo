@@ -59,19 +59,41 @@ def get_fusion(name: str, **kwargs) -> nn.Module:
     return _FUSION_REGISTRY[name](**kwargs)
 
 
-def modality_dim_kwargs(fcfg) -> dict[str, int]:
+def modality_dim_kwargs(fcfg, features_dir=None) -> dict[str, int]:
     """Collect per-modality encoder dim overrides set on the fusion config.
 
-    Returns only the keys explicitly set (non-None) so they can be splatted
-    into `get_fusion(...)` without breaking baseline fusions that don't accept
-    them. Used when an encoder's native output dim differs from `d_model`
-    (e.g. text_dim=1024 for XLM-R-large/CafeBERT vs 768 audio/visual).
+    Returns only the keys resolved to a concrete value so they can be
+    splatted into `get_fusion(...)` without breaking baseline fusions that
+    don't accept them. Used when an encoder's native output dim differs from
+    `d_model` (e.g. text_dim=1024 for XLM-R-large/CafeBERT vs 768
+    audio/visual).
+
+    Resolution order per key: explicit `fcfg.<modality>_dim` wins if set;
+    otherwise, if `features_dir` is given, infer it from one cached clip's
+    `.meta.json` (see `feature_cache.infer_dim_from_cache`). This avoids
+    having to hand-sync e.g. `fusion.audio_dim` every time
+    `audio_encoder.type`/`model_name` changes during ablation.
+
+    Args:
+        fcfg: `cfg.fusion` config namespace.
+        features_dir: Optional `cfg.paths.features` dir to auto-infer missing
+            dims from. If None, only explicit config values are used
+            (previous behavior).
     """
     kwargs: dict[str, int] = {}
     for key in ("text_dim", "audio_dim", "face_dim", "context_dim"):
         val = getattr(fcfg, key, None)
         if val is not None:
             kwargs[key] = val
+        elif features_dir is not None:
+            from pathlib import Path
+
+            from vie_gameemo.data.feature_cache import infer_dim_from_cache
+
+            modality = key[: -len("_dim")]
+            inferred = infer_dim_from_cache(Path(features_dir), modality)
+            if inferred is not None:
+                kwargs[key] = inferred
     return kwargs
 
 

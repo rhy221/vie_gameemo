@@ -1,9 +1,14 @@
-"""Audio encoder using AST (Audio Spectrogram Transformer).
+"""Audio encoder using HuBERT (self-supervised speech representations).
 
-AST is pretrained on AudioSet (audio event classification). It treats the
-log-mel spectrogram as an image and applies a ViT-style transformer.
-For our use case, AST captures non-speech audio events (laughs, shouts,
-sighs) that complement Whisper's speech transcription.
+HuBERT is pretrained via masked prediction of clustered acoustic units on raw
+waveforms (no ASR fine-tuning by default). Like Wav2Vec2, it tends to retain
+prosodic/paralinguistic detail. Included as an ablation alternative to the
+Whisper encoder.
+
+Model variants and hidden sizes:
+    - facebook/hubert-base-ls960:   768d (95M)   <- default
+    - facebook/hubert-large-ll60k:  1024d (317M)
+    - facebook/hubert-xlarge-ll60k: 1280d (964M)
 
 Output: token sequence (B, target_tokens, d_out), adaptively pooled. d_out
 defaults to the model's native hidden size (self.d_out); see audio_whisper.py
@@ -17,32 +22,32 @@ from pathlib import Path
 import librosa
 import torch
 from torch import Tensor, nn
-from transformers import ASTFeatureExtractor, ASTModel
+from transformers import AutoFeatureExtractor, HubertModel
 
 logger = logging.getLogger(__name__)
 
 
-class ASTAudioEncoder(nn.Module):
-    """AST encoder wrapper for emotion-relevant audio features."""
+class HubertAudioEncoder(nn.Module):
+    """HuBERT encoder wrapper for emotion-relevant audio features."""
 
     def __init__(
         self,
-        model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593",
+        model_name: str = "facebook/hubert-base-ls960",
         target_tokens: int = 64,
         d_out: int | None = None,
         sample_rate: int = 16000,
         device: str | torch.device = "cuda",
     ) -> None:
-        """Initialize AST encoder.
+        """Initialize HuBERT encoder.
 
         Args:
-            model_name: HuggingFace model ID.
+            model_name: HuggingFace HuBERT model ID.
             target_tokens: Output sequence length after adaptive pooling.
             d_out: If set and different from the model's native hidden size,
                 adds an (untrained, frozen-context) nn.Linear projection.
                 Leave as None (default) to output the native hidden size and
                 let `fusion.audio_dim` handle standardization instead.
-            sample_rate: Input audio sample rate (must be 16kHz for AST).
+            sample_rate: Input audio sample rate (must be 16kHz for HuBERT).
             device: Torch device.
         """
         super().__init__()
@@ -51,9 +56,9 @@ class ASTAudioEncoder(nn.Module):
         self.sample_rate = sample_rate
         self.device = torch.device(device)
 
-        logger.info("Loading AST model: %s", model_name)
-        self.feature_extractor = ASTFeatureExtractor.from_pretrained(model_name)
-        self.model = ASTModel.from_pretrained(model_name)
+        logger.info("Loading HuBERT model: %s", model_name)
+        self.feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+        self.model = HubertModel.from_pretrained(model_name)
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
@@ -74,14 +79,14 @@ class ASTAudioEncoder(nn.Module):
             self.proj = None
 
         self.d_out = d_out if self.proj is not None else d_model
-        logger.info("AST encoder loaded and frozen (d_model=%d, d_out=%d)", d_model, self.d_out)
+        logger.info("HuBERT encoder loaded and frozen (d_model=%d, d_out=%d)", d_model, self.d_out)
 
     @torch.no_grad()
     def encode(self, audio_path: Path) -> Tensor:
         """Encode a single audio file.
 
         Args:
-            audio_path: Path to wav file (sample_rate Hz, mono).
+            audio_path: Path to wav file (16kHz, mono).
 
         Returns:
             Tensor of shape (1, target_tokens, self.d_out).
@@ -98,11 +103,13 @@ class ASTAudioEncoder(nn.Module):
             sampling_rate=self.sample_rate,
             return_tensors="pt",
         )
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        outputs = self.model(**inputs)
-        hidden = outputs.last_hidden_state  # (1, N, d_model)
+        input_values = inputs.input_values.to(self.device)
+
+        hidden = self.model(input_values).last_hidden_state  # (1, N, d_model)
+
         if self.proj is not None:
             hidden = self.proj(hidden)
+
         return self._adaptive_pool(hidden, self.target_tokens)
 
     @torch.no_grad()
@@ -115,8 +122,8 @@ class ASTAudioEncoder(nn.Module):
         Returns:
             Tensor of shape (N, target_tokens, self.d_out).
         """
-        tensors = [self.encode(p) for p in audio_paths]  # each (1, T, d_out)
-        return torch.cat(tensors, dim=0)  # (N, T, d_out)
+        tensors = [self.encode(p) for p in audio_paths]
+        return torch.cat(tensors, dim=0)
 
     @staticmethod
     def _adaptive_pool(x: Tensor, target_len: int) -> Tensor:
@@ -129,6 +136,6 @@ class ASTAudioEncoder(nn.Module):
         Returns:
             Pooled tensor (B, target_len, D).
         """
-        x_t = x.transpose(1, 2)  # (B, D, T)
+        x_t = x.transpose(1, 2)
         pooled = nn.functional.adaptive_avg_pool1d(x_t, target_len)
-        return pooled.transpose(1, 2)  # (B, target_len, D)
+        return pooled.transpose(1, 2)

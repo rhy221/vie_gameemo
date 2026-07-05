@@ -18,7 +18,7 @@ class EmotionClassifier(nn.Module):
         hidden_dim: Intermediate dim.
         n_classes: Number of emotion classes.
         dropout: Dropout probability.
-        pool: 'mean' | 'max' | 'cls' (uses first token).
+        pool: 'mean' | 'max' | 'cls' (uses first token) | 'attention' (learned weighted sum).
     """
 
     def __init__(
@@ -31,6 +31,8 @@ class EmotionClassifier(nn.Module):
     ) -> None:
         super().__init__()
         self.pool = pool
+        if pool == "attention":
+            self.attn_score = nn.Linear(d_model, 1)
         self.net = nn.Sequential(
             nn.Linear(d_model, hidden_dim),
             nn.GELU(),
@@ -58,6 +60,9 @@ class EmotionClassifier(nn.Module):
                 h, _ = u_fusion.max(dim=1)
             elif self.pool == "cls":
                 h = u_fusion[:, 0, :]
+            elif self.pool == "attention":
+                weights = torch.softmax(self.attn_score(u_fusion), dim=1)  # (B, T, 1)
+                h = (weights * u_fusion).sum(dim=1)
             else:
                 raise ValueError(f"Unknown pool: {self.pool!r}")
         else:

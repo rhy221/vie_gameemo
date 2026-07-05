@@ -30,6 +30,7 @@ opencv-python>=4.10.0
 mediapipe>=0.10.14
 pillow>=10.4.0
 torchvision>=0.16.0
+timm>=1.0.0  # backbone for context_encoder.backend="eva_vit_b" (via transformers timm-wrapper)
 
 # Multimodal (Qwen agents for Stage 0)
 # qwen-vl-utils>=0.0.5  # Helper for Qwen2.5-VL inputs

@@ -2,20 +2,37 @@
 
 Modules:
     - audio_whisper: Whisper encoder for speech prosody features
+    - audio_ast: AST encoder for non-speech audio events (ablation)
+    - audio_wav2vec2: Wav2Vec2 self-supervised speech encoder (ablation)
+    - audio_hubert: HuBERT self-supervised speech encoder (ablation)
     - face_vit: ViT-FER for streamer face (Path 1 of dual-path)
     - context_vit: ViT-ImageNet for gameplay context (Path 2 — vit_imagenet branch)
     - context_pose: Pose-kinematics encoder (Path 2 — pose branch, Phase 0)
     - text_xlmr: XLM-RoBERTa for transcript
 
 All encoders are FROZEN during training (only fusion + classifier are trained).
-Outputs are token sequences of shape (B, T, 768) ready for fusion.
+Outputs are token sequences of shape (B, T, d_out) ready for fusion, where
+d_out defaults to each encoder's native hidden size — see
+`vie_gameemo.fusion.modality_dim_kwargs` for how dimension mismatches across
+audio backbones are standardized (in the trainable fusion MLP, not here).
 
 Context encoder selection:
     Use ``get_context_encoder(cfg)`` to get the right encoder per config:
       - ``visual_encoder.context_encoder.type = "vit_imagenet"`` → ContextEncoder
+        (backbone chosen via ``visual_encoder.context_encoder.backend``:
+        "vit" (default, google/vit-base-patch16-224) | "eva_vit_b" (EVA ViT-B,
+        loaded through transformers' timm-wrapper — requires `timm` installed))
       - ``visual_encoder.context_encoder.type = "pose"``        → PoseContextEncoder
+
+Audio encoder selection:
+    Use ``get_audio_encoder(cfg, device)`` to get the right encoder per config:
+      - ``audio_encoder.type = "whisper"``   → WhisperAudioEncoder (default)
+      - ``audio_encoder.type = "ast"``       → ASTAudioEncoder
+      - ``audio_encoder.type = "wav2vec2"``  → Wav2Vec2AudioEncoder
+      - ``audio_encoder.type = "hubert"``    → HubertAudioEncoder
 """
 
+import torch
 import torch.nn as nn
 
 
@@ -57,9 +74,125 @@ def get_context_encoder(cfg) -> nn.Module:
     else:  # vit_imagenet (default / ablation)
         from vie_gameemo.encoders.context_vit import ContextEncoder
 
+        backend = getattr(ctx_cfg, "backend", "vit") if ctx_cfg is not None else "vit"
+        model_name = resolve_context_vit_model_name(ctx_cfg, backend)
+
         return ContextEncoder(
-            model_name=getattr(ctx_cfg, "model_name", "google/vit-base-patch16-224"),
+            model_name=model_name,
+            backend=backend,
             n_frames=getattr(ctx_cfg, "n_frames", 16),
             target_size=tuple(getattr(ctx_cfg, "target_size", (224, 224))),
             temporal_pool=getattr(ctx_cfg, "temporal_pool", "mean"),
         )
+
+
+_CONTEXT_VIT_DEFAULT_MODEL = {
+    "vit": "google/vit-base-patch16-224",
+    "eva_vit_b": "timm/eva02_base_patch14_224.mim_in22k_ft_in22k_in1k",
+}
+
+
+def resolve_context_vit_model_name(ctx_cfg, backend: str) -> str:
+    """Resolve the checkpoint for the active context-encoder ``backend``.
+
+    Mirrors `resolve_audio_model_name`: reads ``context_encoder.models.<backend>``
+    first, then falls back to the flat ``model_name`` field (so existing configs
+    that only set `model_name` for the "vit" backend keep working unchanged),
+    then to a built-in default per backend.
+    """
+    models_cfg = getattr(ctx_cfg, "models", None) if ctx_cfg is not None else None
+    model_name = getattr(models_cfg, backend, None) if models_cfg is not None else None
+    return (
+        model_name
+        or (getattr(ctx_cfg, "model_name", None) if ctx_cfg is not None else None)
+        or _CONTEXT_VIT_DEFAULT_MODEL.get(backend, _CONTEXT_VIT_DEFAULT_MODEL["vit"])
+    )
+
+
+_AUDIO_ENCODER_DEFAULT_MODEL = {
+    "whisper": "openai/whisper-small",
+    "ast": "MIT/ast-finetuned-audioset-10-10-0.4593",
+    "wav2vec2": "facebook/wav2vec2-base",
+    "hubert": "facebook/hubert-base-ls960",
+}
+
+
+def resolve_audio_model_name(cfg) -> str:
+    """Resolve the checkpoint to load for the active ``audio_encoder.type``.
+
+    Reads ``audio_encoder.models.<type>`` first — a per-type mapping, e.g.::
+
+        audio_encoder:
+          type: "wav2vec2"
+          models:
+            whisper: "openai/whisper-small"
+            wav2vec2: "facebook/wav2vec2-base"
+
+    This means ablating across types only requires flipping ``type``; a flat
+    ``audio_encoder.model_name`` (old-style, single field shared by all types)
+    would silently keep pointing at e.g. a Whisper checkpoint after switching
+    ``type`` to "ast" unless also updated by hand. Falls back to the flat
+    ``model_name`` field, then to a built-in default per type.
+    """
+    acfg = cfg.audio_encoder
+    enc_type = getattr(acfg, "type", "whisper")
+    models_cfg = getattr(acfg, "models", None)
+    model_name = getattr(models_cfg, enc_type, None) if models_cfg is not None else None
+    return (
+        model_name
+        or getattr(acfg, "model_name", None)
+        or _AUDIO_ENCODER_DEFAULT_MODEL[enc_type]
+    )
+
+
+def get_audio_encoder(cfg, device: str | torch.device = "cuda") -> nn.Module:
+    """Factory: instantiate audio encoder per ``audio_encoder.type``.
+
+    Args:
+        cfg: Project config namespace (supports both SimpleNamespace and OmegaConf).
+        device: Torch device for the encoder.
+
+    Returns:
+        Frozen audio encoder module with ``encode`` / ``encode_batch`` methods
+        and a ``d_out`` attribute reporting its actual output dim (see
+        `vie_gameemo.fusion.modality_dim_kwargs` to standardize across types).
+
+    Raises:
+        KeyError: If ``audio_encoder.type`` is not one of
+            "whisper" | "ast" | "wav2vec2" | "hubert".
+    """
+    acfg = cfg.audio_encoder
+    enc_type = getattr(acfg, "type", "whisper")
+
+    if enc_type not in _AUDIO_ENCODER_DEFAULT_MODEL:
+        raise KeyError(
+            f"Unknown audio_encoder.type '{enc_type}'. "
+            f"Available: {sorted(_AUDIO_ENCODER_DEFAULT_MODEL)}"
+        )
+
+    model_name = resolve_audio_model_name(cfg)
+    target_tokens = getattr(acfg, "target_tokens", 64)
+    d_out = getattr(acfg, "d_out", None)
+    sample_rate = getattr(getattr(cfg, "preprocess", None), "audio", None)
+    sample_rate = getattr(sample_rate, "sample_rate", 16000) if sample_rate is not None else 16000
+
+    common_kwargs = dict(
+        model_name=model_name,
+        target_tokens=target_tokens,
+        d_out=d_out,
+        sample_rate=sample_rate,
+        device=device,
+    )
+
+    if enc_type == "whisper":
+        from vie_gameemo.encoders.audio_whisper import WhisperAudioEncoder
+        return WhisperAudioEncoder(**common_kwargs)
+    elif enc_type == "ast":
+        from vie_gameemo.encoders.audio_ast import ASTAudioEncoder
+        return ASTAudioEncoder(**common_kwargs)
+    elif enc_type == "wav2vec2":
+        from vie_gameemo.encoders.audio_wav2vec2 import Wav2Vec2AudioEncoder
+        return Wav2Vec2AudioEncoder(**common_kwargs)
+    else:  # hubert
+        from vie_gameemo.encoders.audio_hubert import HubertAudioEncoder
+        return HubertAudioEncoder(**common_kwargs)
