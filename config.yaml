@@ -411,7 +411,7 @@ fusion:
   # acts as a learned per-modality adapter even when dims already match).
   # Changes the fusion state_dict shape for matched modalities — a checkpoint
   # trained with one setting will NOT load under the other.
-  skip_mlp_if_matched: false
+  skip_mlp_if_matched: true
   n_conv_blocks: 4
   kernel_size: 3
   activation: "switch"         # x * sigmoid(x), Swish-like

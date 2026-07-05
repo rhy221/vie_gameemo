@@ -521,7 +521,7 @@ def train_cognition(
 
     from vie_gameemo.classifiers.mlp import EmotionClassifier
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
-    from vie_gameemo.training.losses import FocalLoss
+    from vie_gameemo.training.losses import build_classification_criterion
 
     ccfg_train = cfg.training.cognition
     pcfg = cfg.training.perception
@@ -612,7 +612,7 @@ def train_cognition(
     else:
         logger.info("No Stage 2a checkpoint — starting ModalAdapter + LoRA from scratch")
 
-    cls_criterion = FocalLoss(gamma=ccfg.loss.focal.gamma)
+    cls_criterion = build_classification_criterion(ccfg.loss)
 
     # Balanced sampler for cognition
     train_loader = _maybe_balanced_sampler(train_loader, cfg)

@@ -56,6 +56,34 @@ class FocalLoss(nn.Module):
         return focal
 
 
+def build_classification_criterion(
+    loss_cfg,
+    alpha: float | Tensor = 1.0,
+) -> nn.Module:
+    """Build the Stage 1/2 classification criterion from `classifier.loss` config.
+
+    Args:
+        loss_cfg: `cfg.classifier.loss` namespace (fields: type, focal.gamma, ...).
+        alpha: Per-class weight tensor (from class_weights) or scalar 1.0.
+            Used as FocalLoss's alpha for "focal", or CrossEntropyLoss's
+            per-class `weight` (only if a Tensor) for "ce"/"weighted_ce".
+
+    Returns:
+        FocalLoss for loss.type == "focal", nn.CrossEntropyLoss otherwise.
+
+    Raises:
+        ValueError: If loss.type is not one of "ce", "weighted_ce", "focal".
+    """
+    loss_type = getattr(loss_cfg, "type", "focal")
+    if loss_type == "focal":
+        return FocalLoss(gamma=getattr(loss_cfg.focal, "gamma", 2.0), alpha=alpha)
+    elif loss_type in ("ce", "weighted_ce"):
+        weight = alpha if isinstance(alpha, Tensor) else None
+        return nn.CrossEntropyLoss(weight=weight)
+    else:
+        raise ValueError(f"Unknown loss type: {loss_type!r}")
+
+
 def make_class_weights(
     labels: list[int],
     n_classes: int,

@@ -52,7 +52,7 @@ def train_perception(
     """
     from vie_gameemo.classifiers.mlp import EmotionClassifier
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
-    from vie_gameemo.training.losses import FocalLoss, make_class_weights
+    from vie_gameemo.training.losses import build_classification_criterion, make_class_weights
 
     pcfg = cfg.training.perception
     fcfg = cfg.fusion
@@ -96,10 +96,7 @@ def train_perception(
         alpha = make_class_weights(all_train_labels, ccfg.n_classes, method=class_weight_method)
         logger.info("Using %s class weights: %s", class_weight_method, alpha)
 
-    criterion = FocalLoss(
-        gamma=getattr(loss_cfg.focal, "gamma", 2.0),
-        alpha=alpha,
-    )
+    criterion = build_classification_criterion(loss_cfg, alpha=alpha)
 
     # Balanced batch sampler: oversample rare classes so each batch is balanced
     sampler_type = getattr(ccfg, "sampler", "none")
