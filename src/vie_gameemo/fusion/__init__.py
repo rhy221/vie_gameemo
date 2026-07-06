@@ -15,6 +15,7 @@ Available fusion types (registered via `get_fusion`):
 The recommended fusion is `conv_attention_4m` (Section 7 of spec).
 """
 
+import inspect
 from typing import Callable
 
 from torch import nn
@@ -43,6 +44,12 @@ def get_fusion(name: str, **kwargs) -> nn.Module:
         name: Registered fusion name (see module docstring).
         **kwargs: Passed to the module constructor.
 
+    Extra kwargs not accepted by the target fusion class's constructor are
+    silently dropped (e.g. `n_conv_blocks` when instantiating `attn_only`).
+    This lets call sites pass one superset of kwargs (sized for
+    `conv_attention_4m`) without needing to know which subset each baseline
+    fusion type actually accepts.
+
     Returns:
         Instantiated nn.Module.
 
@@ -56,7 +63,10 @@ def get_fusion(name: str, **kwargs) -> nn.Module:
         raise KeyError(
             f"Unknown fusion '{name}'. Available: {sorted(_FUSION_REGISTRY)}"
         )
-    return _FUSION_REGISTRY[name](**kwargs)
+    cls = _FUSION_REGISTRY[name]
+    accepted = set(inspect.signature(cls.__init__).parameters) - {"self"}
+    filtered = {k: v for k, v in kwargs.items() if k in accepted}
+    return cls(**filtered)
 
 
 def modality_dim_kwargs(fcfg, features_dir=None) -> dict[str, int]:
