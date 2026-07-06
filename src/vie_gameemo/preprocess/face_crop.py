@@ -29,7 +29,7 @@ def extract_streamer_face(
     target_size: tuple[int, int] = (224, 224),
     margin: float = 0.2,
     tight_crop: bool = True,
-) -> np.ndarray:
+) -> tuple[np.ndarray, bool]:
     """Crop the streamer's face from a frame using the webcam region.
 
     Args:
@@ -40,7 +40,11 @@ def extract_streamer_face(
         tight_crop: If True, run MediaPipe inside webcam region for tighter crop.
 
     Returns:
-        Cropped + resized face as BGR ndarray (target_size[1], target_size[0], 3).
+        Tuple of (cropped + resized face as BGR ndarray, is_tight_face).
+        `is_tight_face` is False when `tight_crop=True` but MediaPipe found no
+        face in the webcam region (fell back to the wider, non-face-only
+        crop), or when the crop region itself was invalid. True when
+        `tight_crop=False` (no detection attempted, crop used as-is).
 
     Raises:
         ValueError: If frame is empty.
@@ -60,15 +64,16 @@ def extract_streamer_face(
 
     if x2 <= x1 or y2 <= y1:
         logger.warning("Invalid crop region; returning black placeholder")
-        return np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
+        return np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8), False
 
     cropped = frame[y1:y2, x1:x2]
 
+    is_tight_face = True
     if tight_crop:
-        cropped = _tight_face_crop(cropped, fallback=cropped)
+        cropped, is_tight_face = _tight_face_crop(cropped, fallback=cropped)
 
     resized = cv2.resize(cropped, target_size, interpolation=cv2.INTER_LINEAR)
-    return resized
+    return resized, is_tight_face
 
 
 def batch_extract_faces(
@@ -76,7 +81,7 @@ def batch_extract_faces(
     webcam_bbox: WebcamBBox | list[WebcamBBox | None],
     target_size: tuple[int, int] = (224, 224),
     margin: float = 0.2,
-) -> np.ndarray:
+) -> tuple[np.ndarray, list[bool]]:
     """Batch face extraction for an entire clip's frames.
 
     Args:
@@ -86,23 +91,32 @@ def batch_extract_faces(
         margin: Margin expansion.
 
     Returns:
-        Stacked array of shape (N, H, W, 3) in BGR.
+        Tuple of:
+            - Stacked array of shape (N, H, W, 3) in BGR.
+            - List of N bools: True where the frame got a real tight face
+              crop, False where it fell back to the wider webcam region (or
+              had no bbox / unreadable frame) — lets callers avoid treating
+              non-face frames as valid face data.
     """
     per_frame = isinstance(webcam_bbox, list)
     faces = []
+    valid = []
     for i, path in enumerate(frame_paths):
         frame = cv2.imread(str(path))
         if frame is None:
             logger.warning("Cannot read frame %s; using zeros", path)
             faces.append(np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8))
+            valid.append(False)
             continue
         bbox = webcam_bbox[i] if per_frame else webcam_bbox
         if bbox is None:
             faces.append(np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8))
+            valid.append(False)
             continue
-        face = extract_streamer_face(frame, bbox, target_size, margin)
+        face, is_tight_face = extract_streamer_face(frame, bbox, target_size, margin)
         faces.append(face)
-    return np.stack(faces, axis=0)
+        valid.append(is_tight_face)
+    return np.stack(faces, axis=0), valid
 
 
 def extract_webcam_region(
@@ -183,7 +197,7 @@ def batch_extract_webcam_regions(
     return crops
 
 
-def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> tuple[np.ndarray, bool]:
     """Run lightweight MediaPipe inside webcam region for a tighter face crop.
 
     Args:
@@ -191,7 +205,11 @@ def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> np.ndarray:
         fallback: Returned as-is if MediaPipe finds no face in the region.
 
     Returns:
-        Tighter face crop, or fallback if detection fails.
+        Tuple of (crop, is_tight_face). `is_tight_face` is False when
+        MediaPipe found no face and `fallback` (the wider, un-refined webcam
+        region — may contain background/hands/desk, not just a face) was
+        returned instead. Callers use this to avoid silently mixing
+        face-only crops and non-face fallback crops in the same sequence.
     """
     try:
         rgb = cv2.cvtColor(region, cv2.COLOR_BGR2RGB)
@@ -208,7 +226,7 @@ def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> np.ndarray:
                 x2 = min(w, int((bx + bw) * w))
                 y2 = min(h, int((by + bh) * h))
                 if x2 > x1 and y2 > y1:
-                    return region[y1:y2, x1:x2]
+                    return region[y1:y2, x1:x2], True
         else:
             results = detector.process(rgb)
             if results.detections:
@@ -218,10 +236,10 @@ def _tight_face_crop(region: np.ndarray, fallback: np.ndarray) -> np.ndarray:
                 x2 = min(w, int((bb.xmin + bb.width) * w))
                 y2 = min(h, int((bb.ymin + bb.height) * h))
                 if x2 > x1 and y2 > y1:
-                    return region[y1:y2, x1:x2]
+                    return region[y1:y2, x1:x2], True
     except Exception as exc:
         logger.debug("Tight crop failed: %s", exc)
-    return fallback
+    return fallback, False
 
 
 def _get_tight_crop_detector():

@@ -307,7 +307,7 @@ visual_encoder:
     # YOLO settings (requires trained weights or COCO pretrained)
     yolo:
       model: "yolo11n.pt"        # path to weights or ultralytics model ID
-      classes: [0]               # 0=person in COCO; change if custom-trained
+      classes: [0]               
 
   # Path 1: face encoder (streamer face only)
   face_encoder:

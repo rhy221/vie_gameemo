@@ -111,12 +111,22 @@ class AttentionBranch(nn.Module):
             nn.Linear(in_dim // 2, n_modalities),
         )
 
-    def forward(self, F_d: Tensor, F_s: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(
+        self, F_d: Tensor, F_s: Tensor, modality_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
         """Forward.
 
         Args:
             F_d: Concatenated features (B, T, n_mods * d_model).
             F_s: Stacked features (B, T, d_model, n_mods).
+            modality_mask: Optional (B, n_mods) bool tensor, True = modality
+                present/valid for that sample. Missing modalities get their
+                softmax logit set to -inf so they receive exactly zero
+                attention weight — unlike zeroing the raw input (which still
+                lets a nonzero, bias-driven MLP output reach this branch and
+                get a nonzero softmax share). Rows where every modality would
+                be masked (shouldn't normally happen) are left unmasked to
+                avoid an all-(-inf) softmax producing NaN.
 
         Returns:
             Tuple of:
@@ -124,6 +134,11 @@ class AttentionBranch(nn.Module):
                 - attn_weights: (B, T, n_mods) softmax weights for interpretability.
         """
         weights = self.weight_mlp(F_d)          # (B, T, n_mods)
+        if modality_mask is not None:
+            mask = modality_mask.unsqueeze(1)  # (B, 1, n_mods), broadcasts over T
+            all_masked = (~mask).all(dim=-1, keepdim=True)  # (B, 1, 1)
+            mask = mask | all_masked  # don't fully mask a row — avoid NaN softmax
+            weights = weights.masked_fill(~mask, float("-inf"))
         weights = F.softmax(weights, dim=-1)      # normalize over modalities
         # F_s: (B, T, D, n_mods); weights: (B, T, n_mods) → unsqueeze
         F_attn = (F_s * weights.unsqueeze(-2)).sum(dim=-1)  # (B, T, D)
@@ -255,9 +270,19 @@ class ConvAttention4M(nn.Module):
         F_d = torch.cat([u_a, u_f, u_c, u_t], dim=-1)          # (B, T, 4*D)
         F_s = torch.stack([u_a, u_f, u_c, u_t], dim=-1)         # (B, T, D, 4)
 
+        # Modality presence mask for the attention branch: only `face` has a
+        # per-sample validity signal (has_face); audio/context/text are
+        # always treated as present. Order matches F_d/F_s: [audio, face,
+        # context, text] (index 1 = face).
+        modality_mask = None
+        if has_face is not None:
+            B = audio.shape[0]
+            modality_mask = torch.ones(B, self.n_modalities, dtype=torch.bool, device=audio.device)
+            modality_mask[:, 1] = has_face.bool()
+
         # Two branches
         F_conv = self.conv_branch(F_d)                           # (B, T, D)
-        F_attn, attn_weights = self.attn_branch(F_d, F_s)       # (B, T, D), (B, T, 4)
+        F_attn, attn_weights = self.attn_branch(F_d, F_s, modality_mask=modality_mask)  # (B, T, D), (B, T, 4)
 
         u_fusion = F_conv + F_attn                               # (B, T, D)
 

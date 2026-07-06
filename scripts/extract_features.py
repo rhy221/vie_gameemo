@@ -221,35 +221,40 @@ def main() -> int:
             if strategy == "full_frame":
                 # Strategy A: no webcam detection, but still crop face via MediaPipe
                 from vie_gameemo.preprocess.face_crop import _tight_face_crop
-                crops = []
+                crops, valid_mask = [], []
                 for fp in frame_paths:
                     frame = cv2.imread(str(fp))
                     if frame is not None:
-                        crops.append(_tight_face_crop(frame, fallback=frame))
-                feat, _ = encoders["face"].encode(crops if crops else None)
+                        cropped, is_tight_face = _tight_face_crop(frame, fallback=frame)
+                        crops.append(cropped)
+                        valid_mask.append(is_tight_face)
+                feat, _ = encoders["face"].encode(crops if crops else None, valid_mask=valid_mask)
                 features["face"] = feat.squeeze(0)
             elif has_face and resolved_bbox is not None and frame_paths:
                 # Strategy B/C: crop face on-the-fly từ bbox + frames
                 from vie_gameemo.preprocess.face_crop import extract_streamer_face
                 margin = getattr(cfg.visual_encoder.face_encoder, "crop_margin", 0.2)
-                crops = []
+                crops, valid_mask = [], []
                 for fp in frame_paths:
                     frame = cv2.imread(str(fp))
                     if frame is not None:
-                        crops.append(extract_streamer_face(frame, resolved_bbox, margin=margin))
-                feat, _ = encoders["face"].encode(crops if crops else None)
+                        cropped, is_tight_face = extract_streamer_face(frame, resolved_bbox, margin=margin)
+                        crops.append(cropped)
+                        valid_mask.append(is_tight_face)
+                feat, _ = encoders["face"].encode(crops if crops else None, valid_mask=valid_mask)
                 features["face"] = feat.squeeze(0)
             else:
                 # No webcam bbox → detect face in full-frame via MediaPipe, crop nếu tìm thấy
                 from vie_gameemo.preprocess.face_crop import _tight_face_crop
                 logger.info("No webcam for %s — detecting face in full frames", clip_id)
-                crops = []
+                crops, valid_mask = [], []
                 for fp in frame_paths:
                     frame = cv2.imread(str(fp))
                     if frame is not None:
-                        cropped = _tight_face_crop(frame, fallback=frame)
+                        cropped, is_tight_face = _tight_face_crop(frame, fallback=frame)
                         crops.append(cropped)
-                feat, _ = encoders["face"].encode(crops if crops else None)
+                        valid_mask.append(is_tight_face)
+                feat, _ = encoders["face"].encode(crops if crops else None, valid_mask=valid_mask)
                 features["face"] = feat.squeeze(0)
 
         if "context" in encoders:

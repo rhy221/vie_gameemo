@@ -307,7 +307,7 @@ def _process_single_clip_local(
                     stability_score=webcam_bbox.stability_score,
                     edge_distance=0.0,
                 )
-                face_crop = extract_streamer_face(frame, wb, target_size=(224, 224), margin=0.2)
+                face_crop, _ = extract_streamer_face(frame, wb, target_size=(224, 224), margin=0.2)
         except Exception as exc:
             logger.debug("Face crop for VLM failed: %s", exc)
 

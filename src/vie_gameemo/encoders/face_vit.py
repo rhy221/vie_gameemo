@@ -78,12 +78,23 @@ class FaceEncoder(nn.Module):
     def encode(
         self,
         face_crops: list[np.ndarray] | None,
+        valid_mask: list[bool] | None = None,
     ) -> tuple[Tensor, bool]:
         """Encode a sequence of face crops with tri-view design.
 
         Args:
             face_crops: List of face crop ndarrays (BGR, HxWx3).
                 If None or empty, returns zeros (no-facecam mode).
+            valid_mask: Optional per-frame bool list, True where the frame is
+                a genuine tight face crop and False where the crop pipeline
+                fell back to a wider, non-face-only region (see
+                `face_crop.extract_streamer_face`). When given and at least
+                one frame is valid, only valid frames are used for peak
+                selection and temporal sampling — otherwise a bad frame
+                (background/hands/desk) can silently sit in the same
+                sequence as real face frames and inject non-face signal.
+                If None, or all frames are invalid, all frames are used
+                (matches previous behavior).
 
         Returns:
             Tuple of:
@@ -94,11 +105,21 @@ class FaceEncoder(nn.Module):
         if not face_crops:
             return torch.zeros(1, self.total_tokens, 768, device=self.device), False
 
-        frames_pil = [_bgr_to_pil(f) for f in face_crops]
+        usable_crops = face_crops
+        if valid_mask is not None and len(valid_mask) == len(face_crops) and any(valid_mask):
+            usable_crops = [c for c, ok in zip(face_crops, valid_mask) if ok]
 
-        # Peak frame: full hidden states (CLS + patches)
-        mid_idx = len(frames_pil) // 2
-        peak_cls, peak_patches = self._encode_full_frame(frames_pil[mid_idx])
+        frames_pil = [_bgr_to_pil(f) for f in usable_crops]
+
+        # Peak frame: pick the frame most different from the clip's mean
+        # appearance (no ground-truth peak label exists — see peak_frame_idx
+        # in Annotation, which is a hardcoded 0 for imported labels, not a
+        # real detected peak). Used ONLY for the fine-grained spatial patch
+        # view below — a single frame is still needed for spatial detail,
+        # and computing full patch-level hidden states for every temporal
+        # frame would be far more expensive for uncertain benefit.
+        peak_idx = _select_peak_frame(frames_pil)
+        _, peak_patches = self._encode_full_frame(frames_pil[peak_idx])
 
         # Spatial pool patch tokens for detail
         pooled_patches = self._spatial_pool_patches(
@@ -110,12 +131,20 @@ class FaceEncoder(nn.Module):
         temporal_cls = torch.cat(
             [self._encode_single_frame(f) for f in sampled], dim=0
         )  # (n_temporal_frames, 768)
+
+        # Global view: mean over the temporal CLS tokens instead of a single
+        # peak frame's CLS. Reduces reliance on any one (possibly
+        # mis-selected) frame for the coarse "global" signal — mirrors
+        # Emotion-LLaMA-v2's adaptive pooling over uniformly-sampled frames
+        # rather than a single-frame global token. Free: temporal_cls is
+        # already computed for the temporal view below.
+        global_cls = temporal_cls.mean(dim=0, keepdim=True)  # (1, 768)
         temporal_cls = temporal_cls.unsqueeze(0)  # (1, n_temporal, 768)
 
         # [peak_patches | global_CLS | temporal_CLS]
         combined = torch.cat([
             pooled_patches,
-            peak_cls.unsqueeze(0),
+            global_cls.unsqueeze(0),
             temporal_cls,
         ], dim=1)
         return combined, True
@@ -124,19 +153,23 @@ class FaceEncoder(nn.Module):
     def encode_batch(
         self,
         batch_face_crops: list[list[np.ndarray] | None],
+        batch_valid_mask: list[list[bool] | None] | None = None,
     ) -> tuple[Tensor, list[bool]]:
         """Batch encode multiple clips.
 
         Args:
             batch_face_crops: List of per-clip face crop lists (some may be None).
+            batch_valid_mask: Optional list of per-clip valid_mask lists (see
+                `encode`), aligned with `batch_face_crops`.
 
         Returns:
             Tuple of (stacked tensor (B, T, 768), list of has_face flags).
         """
         tensors = []
         flags = []
-        for crops in batch_face_crops:
-            t, flag = self.encode(crops)
+        masks = batch_valid_mask if batch_valid_mask is not None else [None] * len(batch_face_crops)
+        for crops, mask in zip(batch_face_crops, masks):
+            t, flag = self.encode(crops, valid_mask=mask)
             tensors.append(t)
             flags.append(flag)
         return torch.cat(tensors, dim=0), flags
@@ -187,6 +220,37 @@ def _bgr_to_pil(bgr: np.ndarray) -> Image.Image:
     """Convert BGR ndarray to RGB PIL Image."""
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     return Image.fromarray(rgb)
+
+
+def _select_peak_frame(frames_pil: list) -> int:
+    """Pick the frame that deviates most from the clip's mean appearance.
+
+    No reliable ground-truth peak-emotion frame exists for this dataset
+    (Annotation.peak_frame_idx is hardcoded to 0 by the flat-label importer,
+    not a real detected peak), so this heuristic stands in for it: downscale
+    each frame to a small grayscale thumbnail, compute the mean thumbnail
+    across the clip, and return the index with the largest L2 distance from
+    that mean. A frame far from the clip's "resting" average is a reasonable
+    proxy for the most expressive moment, and is at least data-driven rather
+    than an arbitrary fixed index.
+
+    Args:
+        frames_pil: Non-empty list of PIL Images (already filtered to valid
+            face crops by the caller).
+
+    Returns:
+        Index into `frames_pil` of the selected peak frame.
+    """
+    if len(frames_pil) == 1:
+        return 0
+
+    thumbs = np.stack([
+        np.asarray(f.convert("L").resize((48, 48)), dtype=np.float32)
+        for f in frames_pil
+    ])  # (N, 48, 48)
+    mean_thumb = thumbs.mean(axis=0, keepdims=True)
+    dists = np.linalg.norm((thumbs - mean_thumb).reshape(len(frames_pil), -1), axis=1)
+    return int(np.argmax(dists))
 
 
 def _uniform_sample(frames: list, n: int) -> list:

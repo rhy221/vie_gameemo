@@ -351,6 +351,7 @@ class AttnOnly(nn.Module):
     ) -> None:
         super().__init__()
         self.align_to = align_to
+        self.n_modalities = n_modalities
 
         self.mlp_audio = nn.Linear(audio_dim or d_model, d_model)
         self.mlp_face = nn.Linear(face_dim or d_model, d_model)
@@ -384,7 +385,16 @@ class AttnOnly(nn.Module):
 
         F_d = torch.cat([u_a, u_f, u_c, u_t], dim=-1)
         F_s = torch.stack([u_a, u_f, u_c, u_t], dim=-1)
-        F_attn, _ = self.attn_branch(F_d, F_s)
+
+        # Modality presence mask (see ConvAttention4M): index 1 = face, the
+        # only modality with a per-sample validity signal (has_face).
+        modality_mask = None
+        if has_face is not None:
+            B = audio.shape[0]
+            modality_mask = torch.ones(B, self.n_modalities, dtype=torch.bool, device=audio.device)
+            modality_mask[:, 1] = has_face.bool()
+
+        F_attn, _ = self.attn_branch(F_d, F_s, modality_mask=modality_mask)
         return F_attn
 
     @staticmethod
