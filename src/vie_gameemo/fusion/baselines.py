@@ -4,6 +4,12 @@ Implements: late, early, MULT, Q-Former, conv_only, attn_only.
 All register via `@register_fusion(name)`.
 
 Use these in ablation experiments to show that Conv-Attention 4M wins.
+
+All classes accept optional `text_dim`/`audio_dim`/`face_dim`/`context_dim`
+overrides (default: `d_model`) so they standardize each modality's raw
+encoder output to `d_model` before fusing — mirrors `ConvAttention4M`'s
+per-modality MLP. This matters because e.g. CafeBERT/XLM-R-large emit
+1024-dim text tokens while audio/visual encoders emit 768-dim.
 """
 
 import torch
@@ -26,12 +32,20 @@ class LateFusion(nn.Module):
     the Conv-Attention module. The classifier will pool this further.
     """
 
-    def __init__(self, d_model: int = 768, n_classes: int = 8) -> None:
+    def __init__(
+        self,
+        d_model: int = 768,
+        n_classes: int = 8,
+        text_dim: int | None = None,
+        audio_dim: int | None = None,
+        face_dim: int | None = None,
+        context_dim: int | None = None,
+    ) -> None:
         super().__init__()
-        self.proj_audio = nn.Linear(d_model, d_model)
-        self.proj_face = nn.Linear(d_model, d_model)
-        self.proj_context = nn.Linear(d_model, d_model)
-        self.proj_text = nn.Linear(d_model, d_model)
+        self.proj_audio = nn.Linear(audio_dim or d_model, d_model)
+        self.proj_face = nn.Linear(face_dim or d_model, d_model)
+        self.proj_context = nn.Linear(context_dim or d_model, d_model)
+        self.proj_text = nn.Linear(text_dim or d_model, d_model)
 
     def forward(
         self,
@@ -63,8 +77,20 @@ class LateFusion(nn.Module):
 class EarlyFusion(nn.Module):
     """Early fusion: concat mean-pooled modalities and project."""
 
-    def __init__(self, d_model: int = 768, n_modalities: int = 4) -> None:
+    def __init__(
+        self,
+        d_model: int = 768,
+        n_modalities: int = 4,
+        text_dim: int | None = None,
+        audio_dim: int | None = None,
+        face_dim: int | None = None,
+        context_dim: int | None = None,
+    ) -> None:
         super().__init__()
+        self.mlp_audio = nn.Linear(audio_dim or d_model, d_model)
+        self.mlp_face = nn.Linear(face_dim or d_model, d_model)
+        self.mlp_context = nn.Linear(context_dim or d_model, d_model)
+        self.mlp_text = nn.Linear(text_dim or d_model, d_model)
         self.proj = nn.Sequential(
             nn.Linear(d_model * n_modalities, d_model * 2),
             nn.GELU(),
@@ -88,10 +114,10 @@ class EarlyFusion(nn.Module):
             mask = has_face.float().view(-1, 1, 1)
             face = face * mask
 
-        a = _pool_sequence(audio)
-        f = _pool_sequence(face)
-        c = _pool_sequence(context)
-        t = _pool_sequence(text)
+        a = self.mlp_audio(_pool_sequence(audio))
+        f = self.mlp_face(_pool_sequence(face))
+        c = self.mlp_context(_pool_sequence(context))
+        t = self.mlp_text(_pool_sequence(text))
 
         concat = torch.cat([a, f, c, t], dim=-1)  # (B, 4*D)
         fused = self.proj(concat)                   # (B, D)
@@ -114,8 +140,20 @@ class MULTFusion(nn.Module):
         n_heads: int = 8,
         n_layers: int = 2,
         n_modalities: int = 4,
+        text_dim: int | None = None,
+        audio_dim: int | None = None,
+        face_dim: int | None = None,
+        context_dim: int | None = None,
     ) -> None:
         super().__init__()
+        # Standardize each modality to d_model before cross-attention so
+        # nn.MultiheadAttention (fixed embed_dim=d_model) works regardless
+        # of a modality's raw encoder output dim (e.g. text_dim=1024).
+        self.mlp_audio = nn.Linear(audio_dim or d_model, d_model)
+        self.mlp_face = nn.Linear(face_dim or d_model, d_model)
+        self.mlp_context = nn.Linear(context_dim or d_model, d_model)
+        self.mlp_text = nn.Linear(text_dim or d_model, d_model)
+
         # Each modality cross-attends to audio
         self.cross_attn = nn.ModuleList([
             nn.MultiheadAttention(d_model, n_heads, batch_first=True)
@@ -139,6 +177,11 @@ class MULTFusion(nn.Module):
         if has_face is not None:
             mask = has_face.float().view(-1, 1, 1)
             face = face * mask
+
+        audio = self.mlp_audio(audio)
+        face = self.mlp_face(face)
+        context = self.mlp_context(context)
+        text = self.mlp_text(text)
 
         modalities = [audio, face, context, text]
         cross_outputs = []
@@ -168,8 +211,19 @@ class QFormerFusion(nn.Module):
         n_queries: int = 32,
         n_heads: int = 8,
         n_layers: int = 2,
+        text_dim: int | None = None,
+        audio_dim: int | None = None,
+        face_dim: int | None = None,
+        context_dim: int | None = None,
     ) -> None:
         super().__init__()
+        # Standardize each modality to d_model before concatenating as KV
+        # (e.g. text_dim=1024 for CafeBERT/XLM-R-large vs 768 audio/visual).
+        self.mlp_audio = nn.Linear(audio_dim or d_model, d_model)
+        self.mlp_face = nn.Linear(face_dim or d_model, d_model)
+        self.mlp_context = nn.Linear(context_dim or d_model, d_model)
+        self.mlp_text = nn.Linear(text_dim or d_model, d_model)
+
         self.queries = nn.Parameter(torch.randn(1, n_queries, d_model))
         self.cross_attn_layers = nn.ModuleList([
             nn.MultiheadAttention(d_model, n_heads, batch_first=True)
@@ -199,6 +253,11 @@ class QFormerFusion(nn.Module):
             face = face * mask
 
         B = audio.shape[0]
+        audio = self.mlp_audio(audio)
+        face = self.mlp_face(face)
+        context = self.mlp_context(context)
+        text = self.mlp_text(text)
+
         # Concatenate all modalities as KV
         kv = torch.cat([audio, face, context, text], dim=1)  # (B, T_total, D)
 
@@ -224,15 +283,19 @@ class ConvOnly(nn.Module):
         n_conv_blocks: int = 4,
         kernel_size: int = 3,
         align_to: str = "audio",
+        text_dim: int | None = None,
+        audio_dim: int | None = None,
+        face_dim: int | None = None,
+        context_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.align_to = align_to
         self.d_model = d_model
 
-        self.mlp_audio = nn.Linear(d_model, d_model)
-        self.mlp_face = nn.Linear(d_model, d_model)
-        self.mlp_context = nn.Linear(d_model, d_model)
-        self.mlp_text = nn.Linear(d_model, d_model)
+        self.mlp_audio = nn.Linear(audio_dim or d_model, d_model)
+        self.mlp_face = nn.Linear(face_dim or d_model, d_model)
+        self.mlp_context = nn.Linear(context_dim or d_model, d_model)
+        self.mlp_text = nn.Linear(text_dim or d_model, d_model)
 
         from vie_gameemo.fusion.conv_attention import ConvBranch
         self.conv_branch = ConvBranch(
@@ -276,14 +339,23 @@ class ConvOnly(nn.Module):
 class AttnOnly(nn.Module):
     """Ablation: only the attention branch of Conv-Attention 4M."""
 
-    def __init__(self, d_model: int = 768, n_modalities: int = 4, align_to: str = "audio") -> None:
+    def __init__(
+        self,
+        d_model: int = 768,
+        n_modalities: int = 4,
+        align_to: str = "audio",
+        text_dim: int | None = None,
+        audio_dim: int | None = None,
+        face_dim: int | None = None,
+        context_dim: int | None = None,
+    ) -> None:
         super().__init__()
         self.align_to = align_to
 
-        self.mlp_audio = nn.Linear(d_model, d_model)
-        self.mlp_face = nn.Linear(d_model, d_model)
-        self.mlp_context = nn.Linear(d_model, d_model)
-        self.mlp_text = nn.Linear(d_model, d_model)
+        self.mlp_audio = nn.Linear(audio_dim or d_model, d_model)
+        self.mlp_face = nn.Linear(face_dim or d_model, d_model)
+        self.mlp_context = nn.Linear(context_dim or d_model, d_model)
+        self.mlp_text = nn.Linear(text_dim or d_model, d_model)
 
         from vie_gameemo.fusion.conv_attention import AttentionBranch
         self.attn_branch = AttentionBranch(
