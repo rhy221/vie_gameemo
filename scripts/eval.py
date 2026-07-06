@@ -97,6 +97,7 @@ def _run_eval(cfg, args) -> dict:
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.perception import (
         infer_fusion_dims_from_checkpoint,
+        infer_fusion_type_from_checkpoint,
         load_checkpoint,
     )
 
@@ -105,12 +106,22 @@ def _run_eval(cfg, args) -> dict:
     ccfg = cfg.classifier
 
     # Build fusion to match the checkpoint's actual architecture. The checkpoint
-    # is the source of truth for per-modality dims (text_dim, etc.); fall back
-    # to config when the checkpoint doesn't pin them down.
+    # is the source of truth for both fusion type and per-modality dims
+    # (text_dim, etc.); fall back to config only when the checkpoint predates
+    # these fields (trained before this was saved).
+    ckpt_fusion_type = infer_fusion_type_from_checkpoint(args.checkpoint)
+    fusion_type = ckpt_fusion_type or fcfg.type
+    if ckpt_fusion_type and ckpt_fusion_type != fcfg.type:
+        logger.warning(
+            "Checkpoint was trained with fusion='%s' but config.yaml has "
+            "fusion.type='%s'; using the checkpoint's type.",
+            ckpt_fusion_type, fcfg.type,
+        )
+
     dim_kwargs = modality_dim_kwargs(fcfg)
     dim_kwargs.update(infer_fusion_dims_from_checkpoint(args.checkpoint, fcfg.d_model))
     fusion = get_fusion(
-        fcfg.type,
+        fusion_type,
         d_model=fcfg.d_model,
         n_modalities=fcfg.n_modalities,
         n_conv_blocks=getattr(fcfg, "n_conv_blocks", 4),

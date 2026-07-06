@@ -108,13 +108,25 @@ def _load_model(checkpoint: Path, cfg: SimpleNamespace, device: torch.device):
     """Load fusion + classifier from perception checkpoint."""
     from vie_gameemo.classifiers.mlp import EmotionClassifier
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
-    from vie_gameemo.training.perception import load_checkpoint
+    from vie_gameemo.training.perception import (
+        infer_fusion_dims_from_checkpoint,
+        infer_fusion_type_from_checkpoint,
+        load_checkpoint,
+    )
 
     fcfg = cfg.fusion
     ccfg = cfg.classifier
 
+    # Checkpoint is the source of truth for both fusion type and per-modality
+    # dims (falls back to config only for checkpoints saved before this was
+    # tracked) — avoids load_state_dict key-mismatch errors when config.yaml
+    # has drifted from what the checkpoint was actually trained with.
+    fusion_type = infer_fusion_type_from_checkpoint(checkpoint) or fcfg.type
+    dim_kwargs = modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features))
+    dim_kwargs.update(infer_fusion_dims_from_checkpoint(checkpoint, fcfg.d_model))
+
     fusion = get_fusion(
-        fcfg.type,
+        fusion_type,
         d_model=fcfg.d_model,
         n_modalities=fcfg.n_modalities,
         n_conv_blocks=getattr(fcfg, "n_conv_blocks", 4),
@@ -122,7 +134,7 @@ def _load_model(checkpoint: Path, cfg: SimpleNamespace, device: torch.device):
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=True,
         skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
-        **modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features)),
+        **dim_kwargs,
     ).to(device)
     classifier = EmotionClassifier(
         d_model=fcfg.d_model,

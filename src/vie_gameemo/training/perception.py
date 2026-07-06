@@ -229,7 +229,7 @@ def train_perception(
         if macro_f1 > state.best_metric:
             state.best_metric = macro_f1
             state.patience_counter = 0
-            _save_checkpoint(best_ckpt, fusion, classifier, optimizer, state)
+            _save_checkpoint(best_ckpt, fusion, classifier, optimizer, state, fusion_type=fcfg.type)
             logger.info("New best model saved (macro_f1=%.4f)", macro_f1)
 
             # Save misclassified clips for dataset review
@@ -352,6 +352,7 @@ def _save_checkpoint(
     classifier: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     state: TrainingState,
+    fusion_type: str | None = None,
 ) -> None:
     """Atomically save training checkpoint.
 
@@ -361,6 +362,10 @@ def _save_checkpoint(
         classifier: Classifier module.
         optimizer: Optimizer state.
         state: Training state.
+        fusion_type: Registered fusion name used to build `fusion` (e.g.
+            "attn_only"). Saved so eval/inference can rebuild the exact
+            architecture from the checkpoint instead of relying on
+            `config.yaml` still matching what was used at train time.
     """
     tmp = path.with_suffix(".tmp")
     torch.save({
@@ -370,6 +375,7 @@ def _save_checkpoint(
         "epoch": state.epoch,
         "global_step": state.global_step,
         "best_metric": state.best_metric,
+        "fusion_type": fusion_type,
     }, tmp)
     tmp.replace(path)
 
@@ -429,3 +435,17 @@ def infer_fusion_dims_from_checkpoint(path: Path, d_model: int) -> dict[str, int
         if w is not None and w.shape[1] != d_model:
             dims[f"{mod}_dim"] = int(w.shape[1])
     return dims
+
+
+def infer_fusion_type_from_checkpoint(path: Path) -> str | None:
+    """Recover the registered fusion name a checkpoint was trained with.
+
+    Older checkpoints saved before this field existed return None — callers
+    should fall back to `cfg.fusion.type` in that case (and should double
+    check it actually matches, since a mismatch fails late with a confusing
+    `load_state_dict` key-mismatch error rather than a clear message).
+    """
+    import sys, types
+    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    return ckpt.get("fusion_type")
