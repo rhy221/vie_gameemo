@@ -141,6 +141,19 @@ class VieGameEmoDataset(Dataset):
         context = _squeeze_batch(features.get("context", torch.zeros(1, 768)))
         text = _squeeze_batch(features.get("text", torch.zeros(1, 768)))
 
+        # Prefer the has_face resolved at extraction time (annotation.webcam_bbox
+        # OR the webcam_bboxes.json fallback — see extract_features.py), since
+        # that's what actually decided the face-crop strategy for this clip.
+        # item["has_face"] (annotation-only) is a stale fallback for caches
+        # extracted before this field existed. Getting this wrong silently
+        # zeroes `face` for every affected clip via fusion's has_face masking,
+        # independent of any explicit --zero-modality flag.
+        cached_has_face = features.get("has_face")
+        if cached_has_face is not None:
+            has_face = bool(cached_has_face.item() if torch.is_tensor(cached_has_face) else cached_has_face)
+        else:
+            has_face = item["has_face"]
+
         # Strategy masking: zero modalities at load time (never baked into cache).
         if self.zero_modalities:
             if "audio" in self.zero_modalities:
@@ -158,7 +171,7 @@ class VieGameEmoDataset(Dataset):
             "context": context,
             "text": text,
             "label": item["label"],
-            "has_face": item["has_face"],
+            "has_face": has_face,
             "clip_id": clip_id,
             "reasoning_text": item.get("reasoning_text", ""),
             "audio_desc": item.get("audio_desc", ""),
