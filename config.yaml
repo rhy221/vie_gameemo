@@ -436,10 +436,10 @@ classifier:
   dropout: 0.3
   activation: "gelu"
   n_classes: 8                 # match labeling.primary_schema (gaming_8)
-  pool: "attention"            # "mean" | "max" | "cls" | "attention" (pool over T tokens of u_fusion)
+  pool: "max"            # "mean" | "max" | "cls" | "attention" (pool over T tokens of u_fusion)
 
   loss:
-    type: "focal"              # "ce" | "weighted_ce" | "focal"
+    type: "weighted_ce"              # "ce" | "weighted_ce" | "focal"
     focal:
       alpha: 1.0               # overridden by class_weights when not "none"
       gamma: 2.5               # 2.5 for imbalance ratio ~12.5:1 (neutral/disgusted)

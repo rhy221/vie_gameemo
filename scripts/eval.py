@@ -54,13 +54,19 @@ def parse_args() -> argparse.Namespace:
         "--ablation", choices=["strategy", "fusion", "llm"], default=None,
         help="Run an ablation suite instead of single-checkpoint eval",
     )
+    parser.add_argument(
+        "--fusion", type=str, default=None,
+        help="Override fusion type (for checkpoints predating the saved "
+             "fusion_type field, or to force a specific architecture)",
+    )
     parser.add_argument("--output", type=Path, default=Path("outputs/results/eval.json"))
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    cfg = load_config(args.config)
+    cli_overrides = {"fusion.type": args.fusion} if args.fusion is not None else None
+    cfg = load_config(args.config, cli_overrides=cli_overrides)
     setup_logging(level=cfg.logging.level, log_file=Path(cfg.logging.file))
     set_seed(cfg.seed)
 
