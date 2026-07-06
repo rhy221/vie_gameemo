@@ -59,6 +59,16 @@ def parse_args() -> argparse.Namespace:
         help="Override fusion type (for checkpoints predating the saved "
              "fusion_type field, or to force a specific architecture)",
     )
+    parser.add_argument(
+        "--zero-modality", action="append", choices=["audio", "face", "context", "text"],
+        default=None, dest="zero_modality",
+        help=(
+            "Ablation: zero out a modality at eval time (repeatable). Should "
+            "match whatever --zero-modality was used at train time to "
+            "measure that model correctly; use a different value only to "
+            "deliberately test robustness to a missing modality."
+        ),
+    )
     parser.add_argument("--output", type=Path, default=Path("outputs/results/eval.json"))
     return parser.parse_args()
 
@@ -97,7 +107,7 @@ def _run_eval(cfg, args) -> dict:
     from torch.utils.data import DataLoader
 
     from vie_gameemo.classifiers.mlp import EmotionClassifier
-    from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn
+    from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn, zero_modalities_for_strategy
     from vie_gameemo.evaluation.metrics import compute_metrics
     from vie_gameemo.evaluation.per_genre import per_genre_metrics
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
@@ -151,11 +161,20 @@ def _run_eval(cfg, args) -> dict:
     annotations_dir = Path(cfg.paths.annotations)
     splits_path = Path(getattr(cfg.paths, "split_manifest", "data/splits.json"))
 
+    strategy = getattr(getattr(cfg, "visual_encoder", None), "strategy", "dual_path")
+    zero_mods = sorted(set(zero_modalities_for_strategy(strategy)) | set(args.zero_modality or []))
+    if zero_mods:
+        logger.info(
+            "Zeroing modalities at load time: %s (strategy='%s' + --zero-modality=%s)",
+            zero_mods, strategy, args.zero_modality or [],
+        )
+
     dataset = VieGameEmoDataset(
         annotations_dir=annotations_dir,
         features_dir=Path(cfg.paths.features),
         split=args.split,
         split_manifest=splits_path if splits_path.exists() else None,
+        zero_modalities=zero_mods,
     )
     loader = DataLoader(
         dataset,

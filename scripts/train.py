@@ -70,6 +70,16 @@ def parse_args() -> argparse.Namespace:
             "modalities — don't mix with checkpoints trained without this flag."
         ),
     )
+    parser.add_argument(
+        "--zero-modality", action="append", choices=["audio", "face", "context", "text"],
+        default=None, dest="zero_modality",
+        help=(
+            "Ablation: zero out a modality at load time (repeatable, e.g. "
+            "--zero-modality audio --zero-modality text). Combined with "
+            "whatever visual_encoder.strategy already zeroes (e.g. "
+            "face_only always zeroes context)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -89,9 +99,12 @@ def main() -> int:
 
     split_manifest = Path(getattr(cfg.paths, "split_manifest", "data/splits.json"))
     strategy = getattr(getattr(cfg, "visual_encoder", None), "strategy", "dual_path")
-    zero_mods = zero_modalities_for_strategy(strategy)
+    zero_mods = sorted(set(zero_modalities_for_strategy(strategy)) | set(args.zero_modality or []))
     if zero_mods:
-        logger.info("Strategy '%s': zeroing modalities at load time: %s", strategy, zero_mods)
+        logger.info(
+            "Zeroing modalities at load time: %s (strategy='%s' + --zero-modality=%s)",
+            zero_mods, strategy, args.zero_modality or [],
+        )
 
     train_ds = VieGameEmoDataset(
         annotations_dir=Path(cfg.paths.annotations),
