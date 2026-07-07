@@ -83,6 +83,8 @@ def get_context_encoder(cfg) -> nn.Module:
             n_frames=getattr(ctx_cfg, "n_frames", 16),
             target_size=tuple(getattr(ctx_cfg, "target_size", (224, 224))),
             temporal_pool=getattr(ctx_cfg, "temporal_pool", "mean"),
+            use_patch_tokens=getattr(ctx_cfg, "use_patch_tokens", False),
+            spatial_pool=tuple(getattr(ctx_cfg, "spatial_pool", (2, 2))),
         )
 
 

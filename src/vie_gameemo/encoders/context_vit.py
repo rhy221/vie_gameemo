@@ -14,6 +14,20 @@ Two backbones are supported via ``backend``:
 Both backbones are loaded via AutoModel/AutoImageProcessor so either can be
 swapped in purely via config — no code branching is needed downstream
 (fusion consumes whatever `d_out` the encoder reports).
+
+``temporal_pool`` and ``use_patch_tokens`` control how much of the 16 sampled
+frames survives into the fused representation (see Emotion-LLaMA-v2's
+spatiotemporal-downsampled "video" stream for the design this mirrors):
+    - temporal_pool="mean" (previous default): collapse across frames.
+    - temporal_pool="none": keep all n_frames steps (no time collapse).
+    - use_patch_tokens=False (previous default, "vit" backend only otherwise
+      ignored): 1 CLS token/frame.
+    - use_patch_tokens=True ("vit" backend only): spatial_pool[0]*spatial_pool[1]
+      pooled patch tokens/frame instead of just CLS, preserving a coarse
+      spatial layout (posture/position), not just "eva_vit_b" appearance.
+Both are independent, off-by-default toggles — set both back to
+("mean", False) to fall back to the original single-mean-token behavior if
+the richer representation doesn't help.
 """
 
 import logging
@@ -39,6 +53,8 @@ class ContextEncoder(nn.Module):
         n_frames: int = 16,
         target_size: tuple[int, int] = (224, 224),
         temporal_pool: str = "mean",
+        use_patch_tokens: bool = False,
+        spatial_pool: tuple[int, int] = (2, 2),
         device: str | torch.device = "cuda",
     ) -> None:
         super().__init__()
@@ -47,6 +63,16 @@ class ContextEncoder(nn.Module):
         self.n_frames = n_frames
         self.target_size = target_size
         self.temporal_pool = temporal_pool
+        self.spatial_pool = spatial_pool
+        self.use_patch_tokens = use_patch_tokens
+        if use_patch_tokens and backend != "vit":
+            logger.warning(
+                "use_patch_tokens=True only supported for backend='vit' (needs "
+                "a known CLS+patch last_hidden_state layout); falling back to "
+                "CLS-only for backend=%r",
+                backend,
+            )
+            self.use_patch_tokens = False
         self.device = torch.device(device)
 
         logger.info("Loading context encoder (backend=%s): %s", backend, model_name)
@@ -58,7 +84,11 @@ class ContextEncoder(nn.Module):
         self.model = self.model.to(self.device)
 
         self.d_out = self._probe_output_dim()
-        logger.info("Context encoder loaded and frozen (d_out=%d)", self.d_out)
+        logger.info(
+            "Context encoder loaded and frozen (d_out=%d, temporal_pool=%s, "
+            "use_patch_tokens=%s, tokens/clip=%d)",
+            self.d_out, self.temporal_pool, self.use_patch_tokens, self._output_seq_len(),
+        )
 
     @torch.no_grad()
     def _probe_output_dim(self) -> int:
@@ -85,6 +115,61 @@ class ContextEncoder(nn.Module):
             return outputs.last_hidden_state.mean(dim=1)
         return outputs.last_hidden_state[:, 0, :]
 
+    def _tokens_per_frame(self) -> int:
+        return self.spatial_pool[0] * self.spatial_pool[1] if self.use_patch_tokens else 1
+
+    def _output_seq_len(self) -> int:
+        per_frame = self._tokens_per_frame()
+        return per_frame if self.temporal_pool == "mean" else self.n_frames * per_frame
+
+    def _encode_frame(self, image: Image.Image) -> Tensor:
+        """Encode one frame → (tokens_per_frame, d_out).
+
+        CLS-only mode (default) returns (1, d_out). Patch-token mode returns
+        (spatial_pool[0]*spatial_pool[1], d_out) — pooled patch grid instead
+        of just the CLS summary, preserving a coarse spatial layout.
+        """
+        inputs = self.processor(images=image, return_tensors="pt")
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        outputs = self.model(**inputs)
+        if self.use_patch_tokens:
+            patches = outputs.last_hidden_state[:, 1:, :]  # (1, N, D), drop CLS
+            return self._spatial_pool_patches(patches, *self.spatial_pool)[0]  # (n_patch, D)
+        return self._extract_embedding(outputs)  # (1, D) — batch dim doubles as "1 token"
+
+    def _encode_sequence(self, frames: list) -> Tensor:
+        """Encode a list of already-sampled frames (PIL Images) into (1, T, d_out).
+
+        T depends on temporal_pool/use_patch_tokens (see _output_seq_len).
+        """
+        # Each _encode_frame call returns (tokens_per_frame, D) — stacking gives
+        # (n_frames, tokens_per_frame, D) uniformly, whether tokens_per_frame
+        # is 1 (CLS-only) or spatial_pool[0]*spatial_pool[1] (patch tokens).
+        per_frame = torch.stack([self._encode_frame(f) for f in frames], dim=0)
+
+        if self.temporal_pool == "mean":
+            pooled = per_frame.mean(dim=0)  # (tokens_per_frame, D) — collapse time, keep space
+        else:
+            pooled = per_frame.reshape(-1, per_frame.shape[-1])  # (n_frames*tokens_per_frame, D)
+        return pooled.unsqueeze(0)  # (1, T, D)
+
+    @staticmethod
+    def _spatial_pool_patches(patches: Tensor, pool_h: int, pool_w: int) -> Tensor:
+        """Spatial average pool over ViT patch tokens (excludes CLS).
+
+        Args:
+            patches: (B, N_patches, D), N_patches assumed to form a square grid.
+            pool_h, pool_w: Target pool grid size.
+
+        Returns:
+            (B, pool_h*pool_w, D) pooled tokens.
+        """
+        B, N, D = patches.shape
+        grid = int(N ** 0.5)
+        patches_grid = patches.view(B, grid, grid, D).permute(0, 3, 1, 2)  # (B, D, H, W)
+        pooled = nn.functional.adaptive_avg_pool2d(patches_grid, (pool_h, pool_w))
+        return pooled.permute(0, 2, 3, 1).reshape(B, pool_h * pool_w, D)
+
     @torch.no_grad()
     def encode(self, webcam_crops: list[np.ndarray] | None) -> Tensor:
         """Encode webcam region crops (wider than face crops).
@@ -94,30 +179,14 @@ class ContextEncoder(nn.Module):
                 If None or empty, returns zeros (no-webcam mode).
 
         Returns:
-            Tensor of shape (1, T, d_out):
-                - T=1 if temporal_pool='mean'
-                - T=n_frames if temporal_pool='none'
+            Tensor of shape (1, T, d_out); T = `_output_seq_len()`.
         """
         if not webcam_crops:
-            T = 1 if self.temporal_pool == "mean" else self.n_frames
-            return torch.zeros(1, T, self.d_out, device=self.device)
+            return torch.zeros(1, self._output_seq_len(), self.d_out, device=self.device)
 
         sampled = _uniform_sample(webcam_crops, self.n_frames)
-        cls_tokens = []
-        for crop in sampled:
-            image = _bgr_to_pil(crop)
-            inputs = self.processor(images=image, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            outputs = self.model(**inputs)
-            cls = self._extract_embedding(outputs)  # (1, d_out)
-            cls_tokens.append(cls)
-
-        stacked = torch.cat(cls_tokens, dim=0)  # (n_frames, d_out)
-
-        if self.temporal_pool == "mean":
-            return stacked.mean(dim=0, keepdim=True).unsqueeze(0)  # (1, 1, d_out)
-        else:
-            return stacked.unsqueeze(0)  # (1, n_frames, d_out)
+        frames = [_bgr_to_pil(crop) for crop in sampled]
+        return self._encode_sequence(frames)
 
     @torch.no_grad()
     def encode_from_paths(self, frame_paths: list[Path]) -> Tensor:
@@ -127,28 +196,14 @@ class ContextEncoder(nn.Module):
             frame_paths: Paths to extracted frame images.
 
         Returns:
-            Tensor of shape (1, T, d_out).
+            Tensor of shape (1, T, d_out); T = `_output_seq_len()`.
         """
         if not frame_paths:
-            T = 1 if self.temporal_pool == "mean" else self.n_frames
-            return torch.zeros(1, T, self.d_out, device=self.device)
+            return torch.zeros(1, self._output_seq_len(), self.d_out, device=self.device)
 
         sampled = _uniform_sample(list(frame_paths), self.n_frames)
-        cls_tokens = []
-        for fp in sampled:
-            image = Image.open(fp).convert("RGB")
-            inputs = self.processor(images=image, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            outputs = self.model(**inputs)
-            cls = self._extract_embedding(outputs)
-            cls_tokens.append(cls)
-
-        stacked = torch.cat(cls_tokens, dim=0)
-
-        if self.temporal_pool == "mean":
-            return stacked.mean(dim=0, keepdim=True).unsqueeze(0)
-        else:
-            return stacked.unsqueeze(0)
+        frames = [Image.open(fp).convert("RGB") for fp in sampled]
+        return self._encode_sequence(frames)
 
     @torch.no_grad()
     def encode_batch(
