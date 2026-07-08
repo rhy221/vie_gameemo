@@ -459,6 +459,20 @@ classifier:
   augment:
     fused_mixup: false              # Manifold Mixup at fused-embedding level (off by default)
 
+  # 2-stage hierarchical classifier: Stage A picks easy-vs-hard group, Stage B
+  # has one small head per group. Derived from test-set confusion analysis:
+  # {shocked,fear,tilted,disgusted} form a mutually-confusable "hard" cluster
+  # (F1 0.62-0.76), distinct from {neutral,hype,amused,sad} ("easy", F1
+  # 0.87-0.94). Set enabled: false to revert to the flat single-head
+  # classifier (previous behavior) if this doesn't help.
+  hierarchical:
+    enabled: false                 # true: 2-stage easy/hard classifier | false (revert): flat head
+    # Indices match EmotionLabel declaration order (schemas.py): neutral=0,
+    # hype=1, amused=2, tilted=3, sad=4, shocked=5, fear=6, disgusted=7.
+    # Must partition range(n_classes) exactly (every index in one group).
+    easy_idx: [0, 1, 2, 4]          # neutral, hype, amused, sad
+    hard_idx: [3, 5, 6, 7]          # tilted, shocked, fear, disgusted
+
 # -----------------------------------------------------------------------------
 # STAGE 5: LLM Reasoner — 4 setups to compare
 # -----------------------------------------------------------------------------

@@ -122,7 +122,7 @@ def train_llm_perception(
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from vie_gameemo.classifiers.mlp import EmotionClassifier
+    from vie_gameemo.classifiers import get_classifier
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
 
     lp_cfg = getattr(cfg.training, "llm_perception", None) or cfg.training.cognition
@@ -130,6 +130,10 @@ def train_llm_perception(
     fcfg = cfg.fusion
     ccfg = cfg.classifier
     llm_cfg = cfg.llm
+
+    import sys, types
+    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
+    ckpt = torch.load(perception_checkpoint, map_location="cpu", weights_only=False)
 
     # Load fusion (init from MLP perception, fine-tune for LLM) + classifier (frozen)
     fusion = get_fusion(
@@ -141,15 +145,10 @@ def train_llm_perception(
         skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
         **modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features)),
     ).to(device)
-    classifier = EmotionClassifier(
-        d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
-        n_classes=ccfg.n_classes, dropout=ccfg.dropout,
-        pool=getattr(ccfg, "pool", "mean"),
-    ).to(device)
-
-    import sys, types
-    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
-    ckpt = torch.load(perception_checkpoint, map_location="cpu", weights_only=False)
+    classifier = get_classifier(
+        ccfg, d_model=fcfg.d_model, device=device,
+        classifier_type=ckpt.get("classifier_type"),
+    )
     fusion.load_state_dict(ckpt["fusion_state_dict"])
     classifier.load_state_dict(ckpt["classifier_state_dict"])
 
@@ -519,7 +518,7 @@ def train_cognition(
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from vie_gameemo.classifiers.mlp import EmotionClassifier
+    from vie_gameemo.classifiers import get_classifier
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.losses import build_classification_criterion
 
@@ -545,13 +544,6 @@ def train_cognition(
         skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
         **modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features)),
     ).to(device)
-    classifier = EmotionClassifier(
-        d_model=fcfg.d_model,
-        hidden_dim=ccfg.hidden_dim,
-        n_classes=ccfg.n_classes,
-        dropout=ccfg.dropout,
-        pool=getattr(ccfg, "pool", "mean"),
-    ).to(device)
 
     import sys, types
     sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
@@ -561,6 +553,10 @@ def train_cognition(
 
     # Classifier always from Stage 1 perception
     cls_ckpt = torch.load(perception_checkpoint, map_location="cpu", weights_only=False)
+    classifier = get_classifier(
+        ccfg, d_model=fcfg.d_model, device=device,
+        classifier_type=cls_ckpt.get("classifier_type"),
+    )
     classifier.load_state_dict(cls_ckpt["classifier_state_dict"])
 
     # Freeze fusion + classifier (frozen in cognition per skeleton spec)

@@ -57,7 +57,7 @@ def main() -> int:
         else ("cuda" if torch.cuda.is_available() else "cpu"),
     )
 
-    from vie_gameemo.classifiers.mlp import EmotionClassifier
+    from vie_gameemo.classifiers import get_classifier
     from vie_gameemo.fusion import get_fusion
     from vie_gameemo.llm.modal_adapter import ModalAdapter
     from vie_gameemo.training.llm1_explanation import _make_bnb_config
@@ -75,13 +75,11 @@ def main() -> int:
         return_attention=False,
         skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
     ).to(device)
-    classifier = EmotionClassifier(
-        d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
-        n_classes=ccfg.n_classes, dropout=ccfg.dropout,
-        pool=getattr(ccfg, "pool", "mean"),
-    ).to(device)
-
     p_ckpt = torch.load(args.perception_ckpt, map_location="cpu")
+    classifier = get_classifier(
+        ccfg, d_model=fcfg.d_model, device=device,
+        classifier_type=p_ckpt.get("classifier_type"),
+    )
     fusion.load_state_dict(p_ckpt["fusion_state_dict"])
     classifier.load_state_dict(p_ckpt["classifier_state_dict"])
     fusion.eval()

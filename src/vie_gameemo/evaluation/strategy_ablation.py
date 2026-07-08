@@ -131,7 +131,7 @@ def run_strategy_ablation(
             device=device,
         )
 
-        from vie_gameemo.classifiers.mlp import EmotionClassifier
+        from vie_gameemo.classifiers import get_classifier
         from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
         from vie_gameemo.training.perception import load_checkpoint
 
@@ -148,13 +148,7 @@ def run_strategy_ablation(
             skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
             **modality_dim_kwargs(fcfg, features_dir=Path(strategy_cfg.paths.features)),
         ).to(device)
-        classifier = EmotionClassifier(
-            d_model=fcfg.d_model,
-            hidden_dim=ccfg.hidden_dim,
-            n_classes=ccfg.n_classes,
-            dropout=ccfg.dropout,
-            pool=getattr(ccfg, "pool", "mean"),
-        ).to(device)
+        classifier = get_classifier(ccfg, d_model=fcfg.d_model, device=device)
         load_checkpoint(best_ckpt, fusion, classifier)
 
         metrics = evaluate(fusion=fusion, classifier=classifier,

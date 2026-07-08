@@ -50,7 +50,7 @@ def train_perception(
     Returns:
         Path to best checkpoint.
     """
-    from vie_gameemo.classifiers.mlp import EmotionClassifier
+    from vie_gameemo.classifiers import get_classifier
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.losses import build_classification_criterion, make_class_weights
 
@@ -71,13 +71,7 @@ def train_perception(
         **modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features)),
     ).to(device)
 
-    classifier = EmotionClassifier(
-        d_model=fcfg.d_model,
-        hidden_dim=ccfg.hidden_dim,
-        n_classes=ccfg.n_classes,
-        dropout=ccfg.dropout,
-        pool=getattr(ccfg, "pool", "mean"),
-    ).to(device)
+    classifier = get_classifier(ccfg, d_model=fcfg.d_model, device=device)
 
     # Class weights for focal/weighted_ce
     loss_cfg = ccfg.loss
@@ -376,6 +370,11 @@ def _save_checkpoint(
         "global_step": state.global_step,
         "best_metric": state.best_metric,
         "fusion_type": fusion_type,
+        # "hierarchical" if classifier is HierarchicalEmotionClassifier, else
+        # "flat" — same rationale as fusion_type: let eval rebuild the exact
+        # classifier architecture from the checkpoint instead of trusting
+        # config.yaml's classifier.hierarchical.enabled to still match.
+        "classifier_type": "hierarchical" if hasattr(classifier, "group_head") else "flat",
     }, tmp)
     tmp.replace(path)
 
@@ -449,3 +448,14 @@ def infer_fusion_type_from_checkpoint(path: Path) -> str | None:
     sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     return ckpt.get("fusion_type")
+
+
+def infer_classifier_type_from_checkpoint(path: Path) -> str | None:
+    """Recover which classifier architecture ("flat" | "hierarchical") a
+    checkpoint was trained with. Older checkpoints predating this field
+    return None — callers should fall back to `cfg.classifier.hierarchical.enabled`.
+    """
+    import sys, types
+    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    return ckpt.get("classifier_type")

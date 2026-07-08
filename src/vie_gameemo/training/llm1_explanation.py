@@ -184,7 +184,7 @@ def train_llm1_stage_a(
     """Stage A: alignment — train ModalAdapter + g_head, freeze everything else."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from vie_gameemo.classifiers.mlp import EmotionClassifier
+    from vie_gameemo.classifiers import get_classifier
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.llm.cue_extractor import CueExtractor
     from vie_gameemo.llm.modal_adapter import ModalAdapter
@@ -209,11 +209,10 @@ def train_llm1_stage_a(
         skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
         **_dim_kwargs,
     ).to(device)
-    classifier = EmotionClassifier(
-        d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
-        n_classes=ccfg.n_classes, dropout=ccfg.dropout,
-        pool=getattr(ccfg, "pool", "mean"),
-    ).to(device)
+    classifier = get_classifier(
+        ccfg, d_model=fcfg.d_model, device=device,
+        classifier_type=ckpt.get("classifier_type"),
+    )
 
     fusion.load_state_dict(ckpt["fusion_state_dict"])
     classifier.load_state_dict(ckpt["classifier_state_dict"])
@@ -367,7 +366,7 @@ def train_llm1_stage_b(
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from vie_gameemo.classifiers.mlp import EmotionClassifier
+    from vie_gameemo.classifiers import get_classifier
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.llm.cue_extractor import CueExtractor
     from vie_gameemo.llm.modal_adapter import ModalAdapter
@@ -389,11 +388,10 @@ def train_llm1_stage_b(
         skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
         **_dim_kwargs,
     ).to(device)
-    classifier = EmotionClassifier(
-        d_model=fcfg.d_model, hidden_dim=ccfg.hidden_dim,
-        n_classes=ccfg.n_classes, dropout=ccfg.dropout,
-        pool=getattr(ccfg, "pool", "mean"),
-    ).to(device)
+    classifier = get_classifier(
+        ccfg, d_model=fcfg.d_model, device=device,
+        classifier_type=ckpt.get("classifier_type"),
+    )
 
     fusion.load_state_dict(ckpt["fusion_state_dict"])
     classifier.load_state_dict(ckpt["classifier_state_dict"])

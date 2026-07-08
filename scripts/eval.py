@@ -106,12 +106,13 @@ def _run_eval(cfg, args) -> dict:
     """Standard checkpoint eval on a single split."""
     from torch.utils.data import DataLoader
 
-    from vie_gameemo.classifiers.mlp import EmotionClassifier
+    from vie_gameemo.classifiers import get_classifier
     from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn, zero_modalities_for_strategy
     from vie_gameemo.evaluation.metrics import compute_metrics
     from vie_gameemo.evaluation.per_genre import per_genre_metrics
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.perception import (
+        infer_classifier_type_from_checkpoint,
         infer_fusion_dims_from_checkpoint,
         infer_fusion_type_from_checkpoint,
         load_checkpoint,
@@ -147,13 +148,8 @@ def _run_eval(cfg, args) -> dict:
         skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
         **dim_kwargs,
     ).to(device)
-    classifier = EmotionClassifier(
-        d_model=fcfg.d_model,
-        hidden_dim=ccfg.hidden_dim,
-        n_classes=ccfg.n_classes,
-        dropout=ccfg.dropout,
-        pool=getattr(ccfg, "pool", "mean"),
-    ).to(device)
+    ckpt_classifier_type = infer_classifier_type_from_checkpoint(args.checkpoint)
+    classifier = get_classifier(ccfg, d_model=fcfg.d_model, device=device, classifier_type=ckpt_classifier_type)
     load_checkpoint(args.checkpoint, fusion, classifier)
     fusion.eval()
     classifier.eval()
@@ -334,7 +330,7 @@ def _run_fusion_ablation(cfg, output_dir: Path) -> dict:
 
         try:
             ckpt = train_perception(sub_cfg, train_loader, val_loader, device)
-            from vie_gameemo.classifiers.mlp import EmotionClassifier
+            from vie_gameemo.classifiers import get_classifier
             from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
             from vie_gameemo.training.perception import evaluate, load_checkpoint
 
@@ -344,8 +340,7 @@ def _run_fusion_ablation(cfg, output_dir: Path) -> dict:
                                   return_attention=False,
                                   skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
                                   **modality_dim_kwargs(fcfg)).to(device)
-            cls_m = EmotionClassifier(fcfg.d_model, ccfg.hidden_dim, ccfg.n_classes, ccfg.dropout,
-                                       pool=getattr(ccfg, "pool", "mean")).to(device)
+            cls_m = get_classifier(ccfg, d_model=fcfg.d_model, device=device)
             load_checkpoint(ckpt, fusion_m, cls_m)
             test_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "test",
                                         split_manifest=splits_path if splits_path.exists() else None)
