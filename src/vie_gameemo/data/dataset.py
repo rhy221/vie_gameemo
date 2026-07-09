@@ -160,6 +160,13 @@ class VieGameEmoDataset(Dataset):
                 audio = torch.zeros_like(audio)
             if "face" in self.zero_modalities:
                 face = torch.zeros_like(face)
+                # has_face otherwise still reflects real webcam detection, so
+                # fusion's attention-mask modality gating (see ConvAttention4M/
+                # AttnOnly) would keep giving face a nonzero attention weight
+                # on has_face=True samples even though its value was just
+                # force-zeroed — weakening this explicit ablation for exactly
+                # the samples where a real face existed.
+                has_face = False
             if "context" in self.zero_modalities:
                 context = torch.zeros_like(context)
             if "text" in self.zero_modalities:

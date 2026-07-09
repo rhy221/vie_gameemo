@@ -1,12 +1,109 @@
-"""Loss functions: Focal Loss and weighted Cross-Entropy.
+"""Loss functions, plus training-time augmentation for cached embeddings.
 
 Focal Loss is recommended for emotion datasets due to class imbalance
 (neutral typically dominant). Weighted CE is a simpler alternative.
+
+Stage 1 (perception) trains on frozen, pre-extracted embeddings, not raw
+pixels/audio (see extract_features.py + dataset.py cached mode) — so classic
+input-level augmentation (color jitter, pitch shift, SpecAugment on a
+spectrogram) can't be applied at train time without re-extracting the cache.
+`embedding_augment` below is the embedding-space stand-in: Gaussian noise +
+SpecAugment-style temporal masking applied directly to the cached (B, T, D)
+modality tensors. Weaker than true raw-level augmentation but zero extra
+extraction cost.
 """
+
+import random
 
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
+
+
+def embedding_augment(
+    x: Tensor,
+    noise_std: float = 0.0,
+    time_mask_p: float = 0.0,
+    max_mask_frac: float = 0.2,
+) -> Tensor:
+    """Embedding-space augmentation for one modality's (B, T, D) batch.
+
+    Two independent, additive perturbations:
+      1. Gaussian noise, scaled by each sample's own embedding std (so the
+         perturbation is roughly comparable across modalities/encoders with
+         different typical magnitudes, instead of one fixed absolute scale).
+      2. A SpecAugment-style time mask: with probability `time_mask_p` per
+         sample, zero one contiguous span of up to `max_mask_frac * T` steps.
+         No-op when T == 1 (nothing to mask along time).
+
+    Args:
+        x: (B, T, D) modality embeddings.
+        noise_std: Relative Gaussian noise std (0 disables).
+        time_mask_p: Per-sample probability of applying one time mask (0 disables).
+        max_mask_frac: Max fraction of T a single mask span can cover.
+
+    Returns:
+        Augmented (B, T, D) tensor — a new tensor; `x` is not mutated.
+    """
+    if noise_std <= 0 and time_mask_p <= 0:
+        return x
+
+    x = x.clone()
+
+    if noise_std > 0:
+        scale = x.detach().std(dim=(1, 2), keepdim=True).clamp(min=1e-6)
+        x = x + torch.randn_like(x) * noise_std * scale
+
+    if time_mask_p > 0 and x.shape[1] > 1:
+        B, T, _ = x.shape
+        max_len = min(max(1, int(T * max_mask_frac)), T - 1)
+        for i in range(B):
+            if random.random() < time_mask_p:
+                mask_len = random.randint(1, max_len)
+                start = random.randint(0, T - mask_len)
+                x[i, start:start + mask_len, :] = 0
+
+    return x
+
+
+def modality_dropout(
+    audio: Tensor, face: Tensor, context: Tensor, text: Tensor, p: float = 0.3,
+    has_face: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None]:
+    """Randomly zero one whole modality per sample (training-time augmentation).
+
+    Forces the model to not over-rely on any single modality always being
+    present. Mutates the input tensors in place (called on a batch already
+    moved to device, before any grad-tracked computation).
+
+    Args:
+        audio, face, context, text: (B, T, D) per-modality batches.
+        p: Per-sample probability of dropping one (randomly chosen) modality.
+        has_face: Optional (B,) bool tensor passed through to fusion's own
+            has_face-based masking. If given and `face` is the modality
+            dropped for a sample, `has_face` is also set False there —
+            otherwise the fusion's attention-mask modality gating (see
+            ConvAttention4M/AttnOnly) would still assign face a nonzero
+            attention weight even though its value was just zeroed here.
+
+    Returns:
+        (audio, face, context, text, has_face) — same tensors, mutated in place.
+    """
+    B = audio.shape[0]
+    for i in range(B):
+        if random.random() < p:
+            drop = random.randint(0, 3)
+            if drop == 0:
+                audio[i] = 0
+            elif drop == 1:
+                face[i] = 0
+                if has_face is not None:
+                    has_face[i] = False
+            elif drop == 2:
+                context[i] = 0
+            else:
+                text[i] = 0
+    return audio, face, context, text, has_face
 
 
 class FocalLoss(nn.Module):

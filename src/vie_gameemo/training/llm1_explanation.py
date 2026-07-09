@@ -16,7 +16,6 @@ Target text format:
 
 import logging
 import math
-import random
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +23,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+
+from vie_gameemo.training.losses import modality_dropout as _modality_dropout
 
 # PyTorch < 2.1 lacks nn.Module.set_submodule, which newer transformers/bitsandbytes
 # call during 4-bit quantization. Patch it if missing so quantization still works.
@@ -155,23 +156,6 @@ def collate_fn_llm1(batch: list[dict]) -> dict:
         "source_language": [b.get("source_language", "vi") for b in batch],
     }
 
-
-
-def _modality_dropout(audio, face, context, text, p: float = 0.3):
-    """Randomly zero one modality per sample (augmentation)."""
-    B = audio.shape[0]
-    for i in range(B):
-        if random.random() < p:
-            drop = random.randint(0, 3)
-            if drop == 0:
-                audio[i] = 0
-            elif drop == 1:
-                face[i] = 0
-            elif drop == 2:
-                context[i] = 0
-            else:
-                text[i] = 0
-    return audio, face, context, text
 
 
 def train_llm1_stage_a(
@@ -574,9 +558,9 @@ def _compute_loss(
 
     # Modality dropout augmentation
     if modality_dropout_p > 0:
-        audio, face, context, text_feat = _modality_dropout(
+        audio, face, context, text_feat, has_face = _modality_dropout(
             audio.clone(), face.clone(), context.clone(), text_feat.clone(),
-            p=modality_dropout_p,
+            p=modality_dropout_p, has_face=has_face.clone(),
         )
 
     # --- Frozen forward ---

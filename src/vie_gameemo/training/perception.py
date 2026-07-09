@@ -52,7 +52,13 @@ def train_perception(
     """
     from vie_gameemo.classifiers import get_classifier
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
-    from vie_gameemo.training.losses import build_classification_criterion, make_class_weights
+    from vie_gameemo.training.losses import (
+        build_classification_criterion,
+        embedding_augment,
+        fused_mixup,
+        make_class_weights,
+        modality_dropout,
+    )
 
     pcfg = cfg.training.perception
     fcfg = cfg.fusion
@@ -82,6 +88,37 @@ def train_perception(
     logger.info(
         "Classifier config: pool=%s, loss=%s, class_weights=%s",
         getattr(ccfg, "pool", "mean"), loss_type, class_weight_method,
+    )
+
+    # Embedding-space augmentation (noise + SpecAugment-style time masking),
+    # applied per-modality before fusion. Config: fusion.embedding_augment.*.
+    # Disable by setting enabled: false. See embedding_augment() docstring for
+    # why this — not raw pixel/audio augmentation — is what's used here.
+    emb_aug_cfg = getattr(fcfg, "embedding_augment", None)
+    emb_aug_enabled = getattr(emb_aug_cfg, "enabled", False) if emb_aug_cfg else False
+    emb_aug_noise_std = getattr(emb_aug_cfg, "noise_std", 0.0) if emb_aug_cfg else 0.0
+    emb_aug_time_mask_p = getattr(emb_aug_cfg, "time_mask_p", 0.0) if emb_aug_cfg else 0.0
+    emb_aug_max_mask_frac = getattr(emb_aug_cfg, "max_mask_frac", 0.2) if emb_aug_cfg else 0.2
+
+    # Modality dropout: randomly zero one whole modality per training sample.
+    # Config: fusion.modality_dropout.{enabled,p}. Disable by setting enabled: false.
+    mod_dropout_cfg = getattr(fcfg, "modality_dropout", None)
+    mod_dropout_enabled = getattr(mod_dropout_cfg, "enabled", False) if mod_dropout_cfg else False
+    mod_dropout_p = getattr(mod_dropout_cfg, "p", 0.3) if mod_dropout_cfg else 0.3
+
+    # Fused mixup: Manifold Mixup at the fused-embedding level, biased toward
+    # rare classes. Config: classifier.augment.{fused_mixup,mixup_alpha,rare_classes}.
+    # Disable by setting fused_mixup: false.
+    augment_cfg = getattr(ccfg, "augment", None)
+    mixup_enabled = getattr(augment_cfg, "fused_mixup", False) if augment_cfg else False
+    mixup_alpha = getattr(augment_cfg, "mixup_alpha", 0.4) if augment_cfg else 0.4
+    mixup_rare_classes = list(getattr(augment_cfg, "rare_classes", [])) if augment_cfg else []
+
+    logger.info(
+        "Augmentation config: embedding_augment=%s (noise_std=%.2f, time_mask_p=%.2f), "
+        "modality_dropout=%s (p=%.2f), fused_mixup=%s (alpha=%.2f, rare_classes=%s)",
+        emb_aug_enabled, emb_aug_noise_std, emb_aug_time_mask_p,
+        mod_dropout_enabled, mod_dropout_p, mixup_enabled, mixup_alpha, mixup_rare_classes,
     )
 
     all_train_labels = [item["label"] for item in train_loader.dataset.items]
@@ -176,12 +213,33 @@ def train_perception(
             if has_face is not None:
                 has_face = has_face.to(device)
 
+            if emb_aug_enabled:
+                audio = embedding_augment(audio, emb_aug_noise_std, emb_aug_time_mask_p, emb_aug_max_mask_frac)
+                face = embedding_augment(face, emb_aug_noise_std, emb_aug_time_mask_p, emb_aug_max_mask_frac)
+                context = embedding_augment(context, emb_aug_noise_std, emb_aug_time_mask_p, emb_aug_max_mask_frac)
+                text = embedding_augment(text, emb_aug_noise_std, emb_aug_time_mask_p, emb_aug_max_mask_frac)
+
+            if mod_dropout_enabled:
+                audio, face, context, text, has_face = modality_dropout(
+                    audio, face, context, text, p=mod_dropout_p, has_face=has_face,
+                )
+
             with autocast(enabled=use_amp, dtype=amp_dtype):
                 fused = fusion(audio, face, context, text, has_face=has_face)
                 if isinstance(fused, tuple):
                     fused = fused[0]
-                logits = classifier(fused)
-                loss = criterion(logits, labels) / grad_accum
+
+                if mixup_enabled:
+                    mixed, labels_a, labels_b, lam = fused_mixup(
+                        fused, labels, ccfg.n_classes,
+                        alpha=mixup_alpha, rare_classes=mixup_rare_classes,
+                    )
+                    logits = classifier(mixed)
+                    loss = (lam * criterion(logits, labels_a)
+                            + (1 - lam) * criterion(logits, labels_b)) / grad_accum
+                else:
+                    logits = classifier(fused)
+                    loss = criterion(logits, labels) / grad_accum
 
             if use_amp and amp_dtype == torch.float16:
                 scaler.scale(loss).backward()

@@ -428,9 +428,24 @@ fusion:
   activation: "switch"         # x * sigmoid(x), Swish-like
   attn_hidden_div: 2           # hidden dim = d_model * n_modalities / 2
 
+  # Embedding-space augmentation (Gaussian noise + SpecAugment-style time
+  # masking), applied per-modality before fusion. Stand-in for raw pixel/audio
+  # augmentation, which isn't possible here since Stage 1 trains on frozen
+  # pre-extracted embeddings (see training/losses.py::embedding_augment).
+  # New — default off (enabled: false) so it's a pure opt-in; set true to try it.
+  embedding_augment:
+    enabled: false
+    noise_std: 0.05             # Gaussian noise std, relative to each sample's own embedding std
+    time_mask_p: 0.2            # per-sample probability of masking one contiguous time span
+    max_mask_frac: 0.2          # that span covers up to 20% of the sequence length
+
+  # Randomly zero one whole modality per training sample each step (forces the
+  # model not to over-rely on any single modality always being present).
+  # Was previously defined but NOT wired into perception.py (silently inert);
+  # now actually applied there. Set enabled: false to revert to no augmentation.
   modality_dropout:
     enabled: true
-    p: 0.3                     # 30% iter drop one modality
+    p: 0.3                     # 30% chance per sample to zero one random modality
 
   # Align sequence lengths to this target before fusion
   align_to: "audio"            # all modality seqs aligned to audio (64 tokens)
@@ -457,7 +472,17 @@ classifier:
     class_weights: "effective_number"   # "inverse_freq" | "effective_number" | "none"
   sampler: "balanced_batch"         # "balanced_batch" | "none"
   augment:
-    fused_mixup: false              # Manifold Mixup at fused-embedding level (off by default)
+    # Manifold Mixup at the fused-embedding level (mixes pairs of samples'
+    # u_fusion before the classifier). Was previously defined but NOT wired
+    # into perception.py (silently inert); now actually applied there. Set
+    # fused_mixup: false to revert to no mixup (previous behavior).
+    fused_mixup: false
+    mixup_alpha: 0.4               # Beta(alpha,alpha) mixing ratio; higher = more mixing
+    # Class indices to bias mixing pairs toward (at least one sample per pair
+    # is drawn from these classes when possible) — targets the smallest-support
+    # classes specifically (disgusted=16, shocked=32 samples in test split).
+    # Indices match EmotionLabel order: shocked=5, disgusted=7.
+    rare_classes: [5, 7]
 
   # 2-stage hierarchical classifier: Stage A picks easy-vs-hard group, Stage B
   # has one small head per group. Derived from test-set confusion analysis:
