@@ -743,3 +743,47 @@ feature_cache:
   format: "pt"   # torch.save
   recompute_if_config_changed: true
   store_attention_weights: false   # set true for interpretability runs
+
+# -----------------------------------------------------------------------------
+# Raw-level augmentation (before encoding — color/crop jitter for face+context
+# images, pitch-shift/time-stretch/noise/SpecAugment for audio). Distinct from
+# fusion.embedding_augment / classifier.augment (which perturb the already-
+# encoded feature). See src/vie_gameemo/augment/.
+# -----------------------------------------------------------------------------
+augment:
+  raw:
+    # "none" (default/revert): no raw augmentation, exactly current behavior.
+    # "precomputed": extract_features.py --augment-copies K caches K extra
+    #   randomly-augmented variants per clip; VieGameEmoDataset randomly picks
+    #   among all cached variants each time a train sample is loaded. Fast
+    #   (no extra cost at train time) but limited to K fixed variants.
+    # "online": re-derive raw crops/waveform + augment + re-encode through the
+    #   (loaded, frozen) encoders every training step — genuinely fresh
+    #   augmentation each time, but much slower (a full encoder forward pass
+    #   per augmented sample per step instead of a free cached-tensor read)
+    #   and loads extra encoder(s) into the training process.
+    mode: "none"
+    # Only used when mode="precomputed": max number of {clip_id}_aug{i}.pt
+    # variants VieGameEmoDataset looks for per clip (must be >= whatever
+    # --augment-copies K was passed to extract_features.py; missing files are
+    # skipped, not an error).
+    precomputed_copies: 5
+
+    # Omit `image` or `audio` entirely to skip augmenting that modality group
+    # (e.g. only set `audio` to augment audio but leave face/context untouched).
+    image:
+      color_jitter:
+        brightness: 0.2
+        contrast: 0.2
+        saturation: 0.2
+        hue: 0.05
+      crop_scale_range: [0.85, 1.0]   # random-crop keeps this fraction of area, then resizes back
+      horizontal_flip_p: 0.0          # off by default
+
+    audio:
+      pitch_shift_semitones: [-2.0, 2.0]
+      time_stretch_rate: [0.9, 1.1]
+      noise_std: [0.0, 0.01]
+      spec_augment:
+        time_mask_p: 0.2
+        freq_mask_p: 0.2

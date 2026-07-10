@@ -51,6 +51,7 @@ def train_perception(
         Path to best checkpoint.
     """
     from vie_gameemo.classifiers import get_classifier
+    from vie_gameemo.data.feature_extraction import apply_online_augment, build_online_augment_context
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.losses import (
         build_classification_criterion,
@@ -153,6 +154,12 @@ def train_perception(
         )
         logger.info("Using balanced_batch sampler (oversampling rare classes)")
 
+    # Online raw augmentation: re-encode face/context/audio from raw data +
+    # augmentation each step, instead of reading the cached embedding. Only
+    # active when config.augment.raw.mode == "online" (see feature_extraction.py).
+    all_train_clip_ids = [item["clip_id"] for item in train_loader.dataset.items]
+    online_augment_ctx = build_online_augment_context(cfg, all_train_clip_ids, device, logger)
+
     params = list(fusion.parameters()) + list(classifier.parameters())
     optimizer = torch.optim.AdamW(
         params,
@@ -212,6 +219,12 @@ def train_perception(
             has_face = batch.get("has_face")
             if has_face is not None:
                 has_face = has_face.to(device)
+
+            if online_augment_ctx is not None:
+                online_feats = apply_online_augment(batch["clip_id"], online_augment_ctx, device, logger)
+                audio = online_feats.get("audio", audio)
+                face = online_feats.get("face", face)
+                context = online_feats.get("context", context)
 
             if emb_aug_enabled:
                 audio = embedding_augment(audio, emb_aug_noise_std, emb_aug_time_mask_p, emb_aug_max_mask_frac)

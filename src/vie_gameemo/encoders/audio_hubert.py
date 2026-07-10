@@ -20,6 +20,7 @@ import logging
 from pathlib import Path
 
 import librosa
+import numpy as np
 import torch
 from torch import Tensor, nn
 from transformers import AutoFeatureExtractor, HubertModel
@@ -82,22 +83,25 @@ class HubertAudioEncoder(nn.Module):
         logger.info("HuBERT encoder loaded and frozen (d_model=%d, d_out=%d)", d_model, self.d_out)
 
     @torch.no_grad()
-    def encode(self, audio_path: Path) -> Tensor:
-        """Encode a single audio file.
+    def encode(self, audio: Path | np.ndarray) -> Tensor:
+        """Encode a single audio file or pre-loaded waveform.
 
         Args:
-            audio_path: Path to wav file (16kHz, mono).
+            audio: Path to wav file (16kHz, mono), or a pre-loaded/augmented
+                1D float32 waveform already at `self.sample_rate` (e.g. from
+                `augment.audio_augment.augment_waveform`).
 
         Returns:
             Tensor of shape (1, target_tokens, self.d_out).
 
         Raises:
-            FileNotFoundError: If audio_path missing.
+            FileNotFoundError: If a Path is given and it doesn't exist.
         """
-        if not audio_path.exists():
-            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        if isinstance(audio, Path):
+            if not audio.exists():
+                raise FileNotFoundError(f"Audio file not found: {audio}")
+            audio, _ = librosa.load(str(audio), sr=self.sample_rate, mono=True)
 
-        audio, _ = librosa.load(str(audio_path), sr=self.sample_rate, mono=True)
         inputs = self.feature_extractor(
             audio,
             sampling_rate=self.sample_rate,

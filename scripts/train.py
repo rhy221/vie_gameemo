@@ -106,12 +106,18 @@ def main() -> int:
             zero_mods, strategy, args.zero_modality or [],
         )
 
+    raw_augment_cfg = getattr(getattr(cfg, "augment", None), "raw", None)
+    precomputed_copies = 0
+    if raw_augment_cfg is not None and getattr(raw_augment_cfg, "mode", "none") == "precomputed":
+        precomputed_copies = getattr(raw_augment_cfg, "precomputed_copies", 5)
+
     train_ds = VieGameEmoDataset(
         annotations_dir=Path(cfg.paths.annotations),
         features_dir=Path(cfg.paths.features),
         split="train",
         split_manifest=split_manifest if split_manifest.exists() else None,
         zero_modalities=zero_mods,
+        precomputed_augment_copies=precomputed_copies,
     )
     val_ds = VieGameEmoDataset(
         annotations_dir=Path(cfg.paths.annotations),
@@ -119,6 +125,7 @@ def main() -> int:
         split="val",
         split_manifest=split_manifest if split_manifest.exists() else None,
         zero_modalities=zero_mods,
+        precomputed_augment_copies=precomputed_copies,
     )
     train_loader = DataLoader(
         train_ds,

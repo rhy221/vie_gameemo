@@ -46,6 +46,7 @@ class VieGameEmoDataset(Dataset):
         label_schema: str = "gaming_8",
         split_manifest: Path | None = None,
         zero_modalities: list[str] | None = None,
+        precomputed_augment_copies: int = 0,
     ) -> None:
         self.annotations_dir = Path(annotations_dir)
         self.features_dir = Path(features_dir)
@@ -55,6 +56,11 @@ class VieGameEmoDataset(Dataset):
         # Modalities to zero at load time (strategy masking, not baked into cache).
         # e.g. ['context'] for face_only, [] for dual_path/full_frame.
         self.zero_modalities: frozenset[str] = frozenset(zero_modalities or [])
+        # Precomputed raw-augmentation variants (see extract_features.py
+        # --augment-copies): only meaningful for split="train" — val/test
+        # must stay on the deterministic, unaugmented original for a stable
+        # evaluation signal across epochs/runs.
+        self.precomputed_augment_copies = precomputed_augment_copies if split == "train" else 0
 
         annotation_files = sorted(self.annotations_dir.glob("*.json"))
         if not annotation_files:
@@ -80,6 +86,15 @@ class VieGameEmoDataset(Dataset):
                     logger.debug("No cached features for %s; skipping", clip_id)
                     continue
 
+            # Precomputed augmented variants for this clip (only those that
+            # actually got cached — e.g. a clip with no frames wouldn't have
+            # produced one, or --augment-copies K might differ run to run).
+            variant_ids = [clip_id]
+            if self.precomputed_augment_copies > 0:
+                for i in range(self.precomputed_augment_copies):
+                    if (self.features_dir / f"{clip_id}_aug{i}.pt").exists():
+                        variant_ids.append(f"{clip_id}_aug{i}")
+
             try:
                 ann = Annotation.load(ann_file)
                 self.items.append({
@@ -92,11 +107,19 @@ class VieGameEmoDataset(Dataset):
                     "visual_desc": getattr(ann, "face_description", ""),
                     "transcript": getattr(ann, "transcript", ""),
                     "source_language": getattr(ann, "source_language", "vi"),
+                    "variant_ids": variant_ids,
                 })
             except Exception as exc:
                 logger.warning("Failed to load annotation %s: %s", ann_file, exc)
 
         logger.info("Loaded %d samples for split=%s", len(self.items), split)
+        if self.precomputed_augment_copies > 0:
+            n_with_variants = sum(1 for it in self.items if len(it["variant_ids"]) > 1)
+            logger.info(
+                "Precomputed augment variants: %d/%d clips have >=1 cached variant "
+                "(requested %d copies/clip)",
+                n_with_variants, len(self.items), self.precomputed_augment_copies,
+            )
 
     def __len__(self) -> int:
         return len(self.items)
@@ -132,7 +155,13 @@ class VieGameEmoDataset(Dataset):
             Sample dict with modality tensors.
         """
         clip_id = item["clip_id"]
-        feat_path = self.features_dir / f"{clip_id}.pt"
+        # Randomly pick among the original + any cached augmented variants
+        # (see extract_features.py --augment-copies) each time this sample is
+        # loaded — a fresh draw per call, so repeated epochs see different
+        # variants rather than one fixed augmented copy per sample.
+        variant_ids = item.get("variant_ids", [clip_id])
+        load_id = random.choice(variant_ids) if len(variant_ids) > 1 else clip_id
+        feat_path = self.features_dir / f"{load_id}.pt"
         features = torch.load(feat_path, map_location="cpu", weights_only=False)
 
         # Squeeze batch dim if present

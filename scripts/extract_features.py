@@ -25,6 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import torch
 
 from vie_gameemo.data.feature_cache import cache_features, is_cache_valid
+from vie_gameemo.data.feature_extraction import (
+    build_augment_fns,
+    extract_clip_features,
+    index_videos,
+    resolve_webcam_bbox,
+)
 from vie_gameemo.data.schemas import Annotation
 from vie_gameemo.utils.config import load_config
 from vie_gameemo.utils.io import ensure_dir
@@ -50,22 +56,17 @@ def parse_args() -> argparse.Namespace:
              "fallback: if a clip's .wav is missing, audio is read straight from "
              "the source .mp4 (librosa decodes it via ffmpeg).",
     )
+    parser.add_argument(
+        "--augment-copies", type=int, default=0,
+        help="Precomputed raw-augmentation mode (config: augment.raw.*): for "
+             "each clip, additionally cache N randomly-augmented variants "
+             "({clip_id}_aug{i}.pt, color/crop jitter for face+context, "
+             "pitch-shift/time-stretch/noise/SpecAugment for audio) alongside "
+             "the original. VieGameEmoDataset randomly picks among all cached "
+             "variants each epoch when raw_augment.mode='precomputed'. 0 "
+             "(default) caches only the original, unaugmented features.",
+    )
     return parser.parse_args()
-
-
-def _index_videos(videos_dir: Path) -> dict[str, Path]:
-    """Map clip_id (stem) → source video path, searching recursively.
-
-    Videos may be nested under split/label subfolders
-    (raw_videos/<split>/<label>/<clip_id>.mp4).
-    """
-    index: dict[str, Path] = {}
-    if not videos_dir.exists():
-        return index
-    for ext in ("*.mp4", "*.mkv", "*.webm", "*.avi", "*.mov"):
-        for vp in videos_dir.glob(f"**/{ext}"):
-            index.setdefault(vp.stem, vp)
-    return index
 
 
 def _config_hash(cfg) -> str:
@@ -129,7 +130,7 @@ def main() -> int:
         logger.info("Loading audio encoder (type=%s)...", getattr(cfg.audio_encoder, "type", "whisper"))
         encoders["audio"] = get_audio_encoder(cfg, device=device)
         videos_dir = args.videos_dir or Path(cfg.paths.raw_videos)
-        video_index = _index_videos(videos_dir)
+        video_index = index_videos(videos_dir)
         logger.info("Indexed %d source videos for audio fallback (%s)",
                     len(video_index), videos_dir)
 
@@ -184,117 +185,16 @@ def main() -> int:
             logger.warning("Failed to load annotation %s: %s", ann_file, exc)
             continue
 
-        features: dict[str, torch.Tensor] = {}
         # Resolve webcam bbox: annotation first, then webcam_bboxes.json fallback
-        resolved_bbox = ann.webcam_bbox
-        if resolved_bbox is None and clip_id in webcam_bboxes and webcam_bboxes[clip_id] is not None:
-            bbox_dict = webcam_bboxes[clip_id]
-            from vie_gameemo.preprocess.webcam_detector import WebcamBBox as DetectorBBox
-            resolved_bbox = DetectorBBox(
-                xmin=bbox_dict["xmin"], ymin=bbox_dict["ymin"],
-                width=bbox_dict["width"], height=bbox_dict["height"],
-                stability_score=bbox_dict.get("stability_score", 0.0),
-                edge_distance=bbox_dict.get("edge_distance", 0.0),
-            )
+        resolved_bbox = resolve_webcam_bbox(ann, clip_id, webcam_bboxes)
         has_face = resolved_bbox is not None
         frame_dir = Path(cfg.paths.frames) / clip_id
         frame_paths = sorted(frame_dir.glob("frame_*.jpg")) if frame_dir.exists() else []
 
-        if "audio" in encoders:
-            audio_path = Path(cfg.paths.audios) / f"{clip_id}.wav"
-            # Prefer a pre-extracted wav; otherwise decode audio straight from
-            # the source video (librosa reads .mp4 via ffmpeg). The dataset
-            # ships only .mp4 clips, so this fallback is the normal path.
-            source = audio_path if audio_path.exists() else video_index.get(clip_id)
-            if source is not None:
-                features["audio"] = encoders["audio"].encode(source).squeeze(0)
-            else:
-                logger.warning("No audio source (wav or video) for: %s", clip_id)
-                features["audio"] = torch.zeros(
-                    cfg.audio_encoder.target_tokens, encoders["audio"].d_out
-                )
-
-        import cv2
-        import numpy as np
-
-        if "face" in encoders:
-            if strategy == "full_frame":
-                # Strategy A: no webcam detection, but still crop face via MediaPipe
-                from vie_gameemo.preprocess.face_crop import _tight_face_crop
-                crops, valid_mask = [], []
-                for fp in frame_paths:
-                    frame = cv2.imread(str(fp))
-                    if frame is not None:
-                        cropped, is_tight_face = _tight_face_crop(frame, fallback=frame)
-                        crops.append(cropped)
-                        valid_mask.append(is_tight_face)
-                feat, _ = encoders["face"].encode(crops if crops else None, valid_mask=valid_mask)
-                features["face"] = feat.squeeze(0)
-            elif has_face and resolved_bbox is not None and frame_paths:
-                # Strategy B/C: crop face on-the-fly từ bbox + frames
-                from vie_gameemo.preprocess.face_crop import extract_streamer_face
-                margin = getattr(cfg.visual_encoder.face_encoder, "crop_margin", 0.2)
-                crops, valid_mask = [], []
-                for fp in frame_paths:
-                    frame = cv2.imread(str(fp))
-                    if frame is not None:
-                        cropped, is_tight_face = extract_streamer_face(frame, resolved_bbox, margin=margin)
-                        crops.append(cropped)
-                        valid_mask.append(is_tight_face)
-                feat, _ = encoders["face"].encode(crops if crops else None, valid_mask=valid_mask)
-                features["face"] = feat.squeeze(0)
-            else:
-                # No webcam bbox → detect face in full-frame via MediaPipe, crop nếu tìm thấy
-                from vie_gameemo.preprocess.face_crop import _tight_face_crop
-                logger.info("No webcam for %s — detecting face in full frames", clip_id)
-                crops, valid_mask = [], []
-                for fp in frame_paths:
-                    frame = cv2.imread(str(fp))
-                    if frame is not None:
-                        cropped, is_tight_face = _tight_face_crop(frame, fallback=frame)
-                        crops.append(cropped)
-                        valid_mask.append(is_tight_face)
-                feat, _ = encoders["face"].encode(crops if crops else None, valid_mask=valid_mask)
-                features["face"] = feat.squeeze(0)
-
-        if "context" in encoders:
-            # Always extract real context features regardless of strategy.
-            # Zeroing for face_only is applied at Dataset load time, not here,
-            # so the cache remains strategy-agnostic and can be reused across runs.
-            ctx_enc_type = getattr(cfg.visual_encoder.context_encoder, "type", "vit_imagenet")
-            if strategy == "dual_path" and has_face and resolved_bbox is not None:
-                from vie_gameemo.preprocess.face_crop import batch_extract_webcam_regions
-                if ctx_enc_type == "pose":
-                    # Pose branch: crop webcam WITHOUT resize (full native resolution for
-                    # better keypoint detection). Same webcam region as ViT for ablation
-                    # fairness (P0.0-fix.1). kps saved to shared cache (P0.0-fix.2).
-                    webcam_crops_raw = batch_extract_webcam_regions(
-                        frame_paths, resolved_bbox, margin=0.1, resize=False,
-                    )
-                    kps_cache_path = (
-                        Path(cfg.paths.cache) / "pose_kinematics" / f"{clip_id}_kps.npy"
-                    )
-                    features["context"] = encoders["context"].encode(
-                        webcam_crops_raw, kps_cache_path=kps_cache_path,
-                    ).squeeze(0)
-                else:
-                    # ViT branch: crop + resize to 224×224 as before
-                    webcam_crops = batch_extract_webcam_regions(
-                        frame_paths, resolved_bbox,
-                        target_size=tuple(cfg.visual_encoder.context_encoder.target_size),
-                    )
-                    features["context"] = encoders["context"].encode(webcam_crops).squeeze(0)
-            else:
-                # full_frame, face_only, or dual_path fallback: full frames
-                if strategy == "dual_path":
-                    logger.warning("Webcam not detected for %s — context encoder fallback to full frames", clip_id)
-                features["context"] = encoders["context"].encode_from_paths(frame_paths).squeeze(0)
-
-        if "text" in encoders:
-            transcript = ann.transcript or ""
-            features["text"] = encoders["text"].encode(transcript).squeeze(0)
-
-        features["has_face"] = torch.tensor([has_face], dtype=torch.bool)
+        features = extract_clip_features(
+            cfg, encoders, clip_id, ann, resolved_bbox, has_face, frame_paths,
+            strategy, video_index, logger,
+        )
 
         # Merge with existing cache if only extracting a subset of modalities
         pt_path = features_dir / f"{clip_id}.pt"
@@ -307,6 +207,22 @@ def main() -> int:
                        config_hash=cfg_hash)
         n_done += 1
         logger.info("[%d/%d] Cached: %s", n_done, len(annotation_files), clip_id)
+
+        if args.augment_copies > 0:
+            image_aug_fn, audio_aug_fn = build_augment_fns(cfg)
+            for i in range(args.augment_copies):
+                aug_id = f"{clip_id}_aug{i}"
+                aug_pt_path = features_dir / f"{aug_id}.pt"
+                if not args.overwrite and aug_pt_path.exists():
+                    continue
+                aug_features = extract_clip_features(
+                    cfg, encoders, clip_id, ann, resolved_bbox, has_face, frame_paths,
+                    strategy, video_index, logger,
+                    image_aug=image_aug_fn, audio_aug=audio_aug_fn,
+                )
+                cache_features(aug_id, aug_features, features_dir, overwrite=True,
+                               config_hash=cfg_hash)
+                logger.info("  + augmented variant %d/%d cached: %s", i + 1, args.augment_copies, aug_id)
 
     logger.info("Feature extraction complete. %d clips cached.", n_done)
     return 0
