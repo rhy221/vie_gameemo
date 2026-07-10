@@ -167,8 +167,12 @@ class HierarchicalEmotionClassifier(nn.Module):
         easy_log_probs = F.log_softmax(self.easy_head(penult), dim=-1)    # (B, n_easy)
         hard_log_probs = F.log_softmax(self.hard_head(penult), dim=-1)    # (B, n_hard)
 
+        # dtype follows group_log_probs (not penult): under autocast, log_softmax
+        # is promoted to float32 for numerical stability even when penult itself
+        # is bf16/fp16 — allocating from penult's dtype would mismatch what's
+        # actually written below and fail on the indexed assignment.
         B = penult.shape[0]
-        logits = penult.new_zeros(B, self.n_classes)
+        logits = group_log_probs.new_zeros(B, self.n_classes)
         logits[:, self.easy_idx] = group_log_probs[:, 0:1] + easy_log_probs
         logits[:, self.hard_idx] = group_log_probs[:, 1:2] + hard_log_probs
 
