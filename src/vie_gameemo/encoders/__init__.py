@@ -90,7 +90,7 @@ def get_context_encoder(cfg) -> nn.Module:
 
 _CONTEXT_VIT_DEFAULT_MODEL = {
     "vit": "google/vit-base-patch16-224",
-    "eva_vit_b": "timm/eva02_base_patch14_224.mim_in22k_ft_in22k_in1k",
+    "eva_vit_b": "timm/eva02_base_patch14_224.mim_in22k",
 }
 
 

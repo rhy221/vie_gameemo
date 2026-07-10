@@ -338,7 +338,7 @@ visual_encoder:
     # cached feature shapes either way (see fusion.modality_dim_kwargs).
     models:
       vit: "google/vit-base-patch16-224"
-      eva_vit_b: "timm/eva02_base_patch14_224.mim_in22k_ft_in22k_in1k"   # EVA02-Base, 768d
+      eva_vit_b: "timm/eva02_base_patch14_224.mim_in22k"   # EVA02-Base, 768d, 224x224 (MIM pretrain, no classifier — used as feature backbone same as vit)
     n_frames: 16
     target_size: [224, 224]
     # Emotion-LLaMA-v2-inspired richer context representation (see its
@@ -347,8 +347,8 @@ visual_encoder:
     # are independent and OFF-like-before by default combination is
     # ("mean", false); set them back to that pair to revert to the original
     # single-token-per-clip behavior if this doesn't help.
-    temporal_pool: "none"           # "mean" (revert: 1 token/clip) | "none" (keep 16 steps)
-    use_patch_tokens: true          # true: keep pooled patch tokens (spatial layout, "vit" backend
+    temporal_pool: "mean"           # "mean" (revert: 1 token/clip) | "none" (keep 16 steps)
+    use_patch_tokens: false          # true: keep pooled patch tokens (spatial layout, "vit" backend
                                      # only) | false (revert): CLS-only, matches previous behavior
     spatial_pool: [2, 2]            # patch grid pooled to this size per frame when use_patch_tokens
                                      # (2x2x16=64 tokens/clip with temporal_pool="none", matching
