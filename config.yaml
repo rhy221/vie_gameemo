@@ -405,9 +405,15 @@ fusion:
 
   d_model: 768                 # shared fused channel dim after per-modality MLPs
   n_modalities: 4              # audio + face + context + text
-  # Raw text-encoder output dim before standardization. CafeBERT / xlmr-large
-  # emit 1024; set to 768 (or remove) if using xlmr-base / a 768-dim backend.
-  text_dim: 1024
+  # Raw text-encoder output dim before standardization. Leave unset (null) to
+  # auto-infer from the cached feature shapes in paths.features (see
+  # modality_dim_kwargs) — this tracks text_encoder.backend automatically, so
+  # switching cafebert/xlmr_large (1024d) vs xlmr_base/xlm_emo/phobert (768d)
+  # doesn't require hand-syncing this value (that hand-sync was the cause of
+  # a "mat1 and mat2 shapes cannot be multiplied" crash when switching to a
+  # 768-dim backend while this was still hardcoded to 1024). Set explicitly
+  # only to override auto-detection.
+  text_dim: null
   # Raw audio-encoder output dim before standardization. Leave unset (null)
   # to auto-infer from the cached feature shapes in paths.features (see
   # modality_dim_kwargs) — this tracks audio_encoder.type/model_name
