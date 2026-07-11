@@ -37,14 +37,6 @@ from vie_gameemo.utils.io import ensure_dir
 from vie_gameemo.utils.logging import get_logger, setup_logging
 from vie_gameemo.utils.seed import set_seed
 
-# Some cuDNN v8 builds can't find an execution engine for the large-kernel
-# "patchify" conv used by ViT-family patch embeddings (kernel_size == stride,
-# e.g. 16x16) on certain GPU/cuDNN combos, raising "GET was unable to find an
-# engine to execute this computation". Frozen feature extraction here is a
-# one-shot cost (not a training loop), so falling back to PyTorch's native
-# conv kernels is an acceptable tradeoff for robustness across environments.
-torch.backends.cudnn.enabled = False
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stage 2: extract + cache features")
