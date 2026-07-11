@@ -131,8 +131,6 @@ def train_llm_perception(
     ccfg = cfg.classifier
     llm_cfg = cfg.llm
 
-    import sys, types
-    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
     ckpt = torch.load(perception_checkpoint, map_location="cpu", weights_only=False)
 
     # Load fusion (init from MLP perception, fine-tune for LLM) + classifier (frozen)
@@ -545,8 +543,6 @@ def train_cognition(
         **modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features)),
     ).to(device)
 
-    import sys, types
-    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
     fusion_ckpt = torch.load(fusion_source, map_location="cpu", weights_only=False)
     fusion.load_state_dict(fusion_ckpt["fusion_state_dict"])
     logger.info("Loaded fusion from %s", fusion_source)

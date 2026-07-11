@@ -467,8 +467,6 @@ def load_checkpoint(
     Returns:
         Restored TrainingState.
     """
-    import sys, types
-    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     fusion.load_state_dict(ckpt["fusion_state_dict"])
     classifier.load_state_dict(ckpt["classifier_state_dict"])
@@ -495,8 +493,6 @@ def infer_fusion_dims_from_checkpoint(path: Path, d_model: int) -> dict[str, int
     modalities need no override, and emitting them would break baseline
     fusions that don't accept ``*_dim`` kwargs.
     """
-    import sys, types
-    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     sd = ckpt.get("fusion_state_dict", {})
     dims: dict[str, int] = {}
@@ -515,8 +511,6 @@ def infer_fusion_type_from_checkpoint(path: Path) -> str | None:
     check it actually matches, since a mismatch fails late with a confusing
     `load_state_dict` key-mismatch error rather than a clear message).
     """
-    import sys, types
-    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     return ckpt.get("fusion_type")
 
@@ -526,7 +520,5 @@ def infer_classifier_type_from_checkpoint(path: Path) -> str | None:
     checkpoint was trained with. Older checkpoints predating this field
     return None — callers should fall back to `cfg.classifier.hierarchical.enabled`.
     """
-    import sys, types
-    sys.modules.setdefault("torch.utils.serialization", types.ModuleType("torch.utils.serialization"))
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     return ckpt.get("classifier_type")
