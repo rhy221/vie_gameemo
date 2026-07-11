@@ -434,7 +434,7 @@ fusion:
   # pre-extracted embeddings (see training/losses.py::embedding_augment).
   # New — default off (enabled: false) so it's a pure opt-in; set true to try it.
   embedding_augment:
-    enabled: false
+    enabled: true
     noise_std: 0.05             # Gaussian noise std, relative to each sample's own embedding std
     time_mask_p: 0.2            # per-sample probability of masking one contiguous time span
     max_mask_frac: 0.2          # that span covers up to 20% of the sequence length
