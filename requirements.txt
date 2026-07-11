@@ -4,11 +4,15 @@
 # Install: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
 #
 # Note for CUDA: install torch separately from https://pytorch.org/get-started/
-# This file uses torch>=2.1, leaving CUDA variant to user (default = cu121).
+# This file uses torch>=2.6, leaving CUDA variant to user (default = cu121).
 # =============================================================================
 
 # Core ML
-torch>=2.1.0
+# >=2.6 required: transformers now refuses torch.load() of pickle (.bin)
+# checkpoints below this version (CVE-2025-32434) — some hub repos (e.g.
+# facebook/hubert-base-ls960) ship pytorch_model.bin with no safetensors
+# alternative, so this floor isn't optional for audio_encoder.type="hubert".
+torch>=2.6.0
 transformers>=4.45.0
 accelerate>=0.34.0
 peft>=0.13.0
