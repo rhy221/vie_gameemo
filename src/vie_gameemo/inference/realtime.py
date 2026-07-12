@@ -222,8 +222,8 @@ class RealtimeInferenceRunner:
     def _encode_faces(self, frames: list) -> tuple[torch.Tensor, bool]:
         """Encode face crops from PIL frames → (1, T, 768), has_face."""
         try:
-            from vie_gameemo.encoders.face_vit import FaceEncoder
-            enc = FaceEncoder()
+            from vie_gameemo.encoders import get_face_encoder
+            enc = get_face_encoder(self.cfg, device=self._device)
             tensor, has_face = enc.encode(frames)
             del enc
             return tensor, has_face
@@ -235,8 +235,8 @@ class RealtimeInferenceRunner:
     def _encode_context(self, frames: list) -> torch.Tensor:
         """Encode webcam region crops → (1, T, 768) context tensor."""
         try:
-            from vie_gameemo.encoders.context_vit import ContextEncoder
-            enc = ContextEncoder()
+            from vie_gameemo.encoders import get_context_encoder
+            enc = get_context_encoder(self.cfg).to(self._device)
             if self.cached_webcam_bbox is not None:
                 import cv2
                 import numpy as np

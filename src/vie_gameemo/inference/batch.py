@@ -244,8 +244,8 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
     features["audio"] = audio_enc.encode(audio_path)
     del audio_enc
 
-    from vie_gameemo.encoders.context_vit import ContextEncoder
-    ctx_enc = ContextEncoder()
+    from vie_gameemo.encoders import get_context_encoder
+    ctx_enc = get_context_encoder(cfg).to(device)
     if webcam_bbox is not None:
         from vie_gameemo.preprocess.face_crop import batch_extract_webcam_regions
         webcam_crops = batch_extract_webcam_regions(frame_paths, webcam_bbox)
@@ -259,8 +259,8 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
     features["text"] = text_enc.encode("")
     del text_enc
 
-    from vie_gameemo.encoders.face_vit import FaceEncoder
-    face_enc = FaceEncoder()
+    from vie_gameemo.encoders import get_face_encoder
+    face_enc = get_face_encoder(cfg, device=device)
     face_tensor, has_face = face_enc.encode(frame_paths)
     features["face"] = face_tensor
     features["has_face"] = has_face

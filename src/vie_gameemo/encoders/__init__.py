@@ -16,6 +16,11 @@ d_out defaults to each encoder's native hidden size — see
 `vie_gameemo.fusion.modality_dim_kwargs` for how dimension mismatches across
 audio backbones are standardized (in the trainable fusion MLP, not here).
 
+Face encoder selection:
+    Use ``get_face_encoder(cfg, device)`` to get the right encoder per config:
+      - ``visual_encoder.face_encoder.backend = "vit"`` (default) → trpakov/vit-face-expression
+      - ``visual_encoder.face_encoder.backend = "vit_multi"``     → mo-thecreator/vit-Facial-Expression-Recognition
+
 Context encoder selection:
     Use ``get_context_encoder(cfg)`` to get the right encoder per config:
       - ``visual_encoder.context_encoder.type = "vit_imagenet"`` → ContextEncoder
@@ -108,6 +113,65 @@ def resolve_context_vit_model_name(ctx_cfg, backend: str) -> str:
         model_name
         or (getattr(ctx_cfg, "model_name", None) if ctx_cfg is not None else None)
         or _CONTEXT_VIT_DEFAULT_MODEL.get(backend, _CONTEXT_VIT_DEFAULT_MODEL["vit"])
+    )
+
+
+_FACE_VIT_DEFAULT_MODEL = {
+    "vit": "trpakov/vit-face-expression",
+    "vit_multi": "mo-thecreator/vit-Facial-Expression-Recognition",
+}
+
+
+def resolve_face_model_name(face_cfg, backend: str) -> str:
+    """Resolve the checkpoint for the active face-encoder ``backend``.
+
+    Mirrors `resolve_context_vit_model_name`: reads ``face_encoder.models.<backend>``
+    first, then falls back to the flat ``model_name`` field, then to a built-in
+    default per backend.
+    """
+    models_cfg = getattr(face_cfg, "models", None) if face_cfg is not None else None
+    model_name = getattr(models_cfg, backend, None) if models_cfg is not None else None
+    return (
+        model_name
+        or (getattr(face_cfg, "model_name", None) if face_cfg is not None else None)
+        or _FACE_VIT_DEFAULT_MODEL.get(backend, _FACE_VIT_DEFAULT_MODEL["vit"])
+    )
+
+
+def get_face_encoder(cfg, device: str | torch.device = "cuda") -> nn.Module:
+    """Factory: instantiate face encoder per ``visual_encoder.face_encoder.backend``.
+
+    Args:
+        cfg: Project config namespace (supports both SimpleNamespace and OmegaConf).
+        device: Torch device for the encoder.
+
+    Returns:
+        Frozen `FaceEncoder` (ViT-FER, Path 1 of dual-path).
+    """
+    from vie_gameemo.encoders.face_vit import FaceEncoder
+
+    try:
+        face_cfg = cfg.visual_encoder.face_encoder
+    except AttributeError:
+        face_cfg = None
+
+    backend = getattr(face_cfg, "backend", "vit") if face_cfg is not None else "vit"
+    model_name = resolve_face_model_name(face_cfg, backend)
+
+    temporal_cfg = getattr(getattr(face_cfg, "dual_view", None), "temporal", None)
+    n_temporal_frames = getattr(temporal_cfg, "n_frames", 16) if temporal_cfg else 16
+    # NOTE: spatial_pool intentionally NOT read from dual_view.temporal.spatial_pool
+    # here — existing call sites never passed it either (always used FaceEncoder's
+    # (4, 4) default), so wiring it in now would silently change n_patch_tokens
+    # (and thus total_tokens / cached feature shapes) for anyone already relying
+    # on the current default. Left as a known gap, not fixed here.
+
+    return FaceEncoder(
+        model_name=model_name,
+        backend=backend,
+        n_temporal_frames=n_temporal_frames,
+        target_size=tuple(getattr(face_cfg, "target_size", (224, 224)) if face_cfg is not None else (224, 224)),
+        device=device,
     )
 
 

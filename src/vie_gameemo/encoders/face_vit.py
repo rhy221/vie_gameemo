@@ -1,7 +1,7 @@
 """Face encoder using ViT-FER (Path 1 of dual-path visual).
 
-Encodes the streamer's face (cropped from webcam region) using ViT pretrained
-on AffectNet for facial expression recognition. Uses a tri-view design:
+Encodes the streamer's face (cropped from webcam region) using a ViT-Base
+FER (Facial Expression Recognition) fine-tune. Uses a tri-view design:
     - Spatial view: peak frame PATCH tokens (pooled) for micro-expression detail
     - Global view: peak frame CLS token
     - Temporal view: 16 evenly-sampled frames, each CLS token kept
@@ -10,7 +10,15 @@ Output layout: [peak_patches | global_CLS | temporal_CLS]
 
 IMPORTANT: This encoder receives FACE CROPS from face_crop.py, not full
 frames. Do not feed full frames into ViT-FER (distribution mismatch with
-AffectNet pretrain).
+the FER pretrain data).
+
+Two checkpoints are supported via ``backend`` (both ViT-Base, 768d — see
+``visual_encoder.face_encoder.models`` in config.yaml):
+    - "vit"       (default): trpakov/vit-face-expression, fine-tuned on FER2013 only.
+    - "vit_multi": mo-thecreator/vit-Facial-Expression-Recognition, fine-tuned
+      on FER2013 + MMI + AffectNet (broader data, ~84% self-reported acc).
+Loaded via AutoModel/AutoImageProcessor so either (or any other ViT-Base FER
+checkpoint) can be swapped in purely via config.
 """
 
 import logging
@@ -21,7 +29,7 @@ import numpy as np
 import torch
 from PIL import Image
 from torch import Tensor, nn
-from transformers import AutoImageProcessor, ViTModel
+from transformers import AutoImageProcessor, AutoModel
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +44,7 @@ class FaceEncoder(nn.Module):
     def __init__(
         self,
         model_name: str = "trpakov/vit-face-expression",
+        backend: str = "vit",
         n_temporal_frames: int = 16,
         spatial_pool: tuple[int, int] = (4, 4),
         target_size: tuple[int, int] = (224, 224),
@@ -44,7 +53,11 @@ class FaceEncoder(nn.Module):
         """Initialize face encoder.
 
         Args:
-            model_name: HF model ID (ViT-FER pretrained on AffectNet).
+            model_name: HF model ID (ViT-FER fine-tune).
+            backend: Which checkpoint family this is ("vit" | "vit_multi") —
+                purely informational/for logging here since both are loaded
+                identically via AutoModel; kept for parity with context_vit's
+                backend param and future non-ViT-Base additions.
             n_temporal_frames: Frames sampled for temporal view.
             spatial_pool: (H, W) pooling on peak frame patch grid.
             target_size: Input frame resize target (W, H).
@@ -52,14 +65,15 @@ class FaceEncoder(nn.Module):
         """
         super().__init__()
         self.model_name = model_name
+        self.backend = backend
         self.n_temporal_frames = n_temporal_frames
         self.spatial_pool = spatial_pool
         self.target_size = target_size
         self.device = torch.device(device)
 
-        logger.info("Loading ViT-FER: %s", model_name)
+        logger.info("Loading ViT-FER (backend=%s): %s", backend, model_name)
         self.processor = AutoImageProcessor.from_pretrained(model_name)
-        self.model = ViTModel.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name)
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False

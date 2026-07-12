@@ -297,15 +297,9 @@ def build_online_augment_context(cfg, clip_ids: list[str], device, logger: loggi
         logger.info("Online augment: loading audio encoder...")
         encoders["audio"] = get_audio_encoder(cfg, device=device)
     if image_aug is not None:
-        from vie_gameemo.encoders import get_context_encoder
-        from vie_gameemo.encoders.face_vit import FaceEncoder
+        from vie_gameemo.encoders import get_context_encoder, get_face_encoder
         logger.info("Online augment: loading face + context encoders...")
-        encoders["face"] = FaceEncoder(
-            model_name=cfg.visual_encoder.face_encoder.model_name,
-            n_temporal_frames=cfg.visual_encoder.face_encoder.dual_view.temporal.n_frames,
-            target_size=tuple(cfg.visual_encoder.face_encoder.target_size),
-            device=device,
-        )
+        encoders["face"] = get_face_encoder(cfg, device=device)
         encoders["context"] = get_context_encoder(cfg).to(device)
 
     strategy = getattr(cfg.visual_encoder, "strategy", "dual_path")

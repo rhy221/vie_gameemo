@@ -73,7 +73,11 @@ def _config_hash(cfg) -> str:
     """Compute a hash of the encoder config for cache invalidation."""
     ctx_cfg = cfg.visual_encoder.context_encoder
     ctx_type = getattr(ctx_cfg, "type", "vit_imagenet")
-    from vie_gameemo.encoders import resolve_audio_model_name, resolve_context_vit_model_name
+    from vie_gameemo.encoders import (
+        resolve_audio_model_name,
+        resolve_context_vit_model_name,
+        resolve_face_model_name,
+    )
 
     # Distinguish pose vs vit_imagenet; pose has no model_name.
     # For vit_imagenet, resolve via backend/models (not the flat model_name
@@ -85,12 +89,16 @@ def _config_hash(cfg) -> str:
         ctx_backend = getattr(ctx_cfg, "backend", "vit")
         ctx_key = f"{ctx_backend}:{resolve_context_vit_model_name(ctx_cfg, ctx_backend)}"
 
+    face_cfg = cfg.visual_encoder.face_encoder
+    face_backend = getattr(face_cfg, "backend", "vit")
+    face_key = f"{face_backend}:{resolve_face_model_name(face_cfg, face_backend)}"
+
     relevant = {
         "audio_type": getattr(cfg.audio_encoder, "type", "whisper"),
         "audio": resolve_audio_model_name(cfg),
         "audio_tokens": cfg.audio_encoder.target_tokens,
         "audio_d_out": getattr(cfg.audio_encoder, "d_out", None),
-        "face": cfg.visual_encoder.face_encoder.model_name,
+        "face": face_key,
         "context": ctx_key,
         "text": getattr(cfg.text_encoder, "model", getattr(cfg.text_encoder, "model_name", "unknown")),
         "text_backend": getattr(cfg.text_encoder, "backend", getattr(cfg.text_encoder, "type", "xlmr")),
@@ -135,14 +143,10 @@ def main() -> int:
                     len(video_index), videos_dir)
 
     if "face" in args.modalities:
-        from vie_gameemo.encoders.face_vit import FaceEncoder
-        logger.info("Loading face encoder...")
-        encoders["face"] = FaceEncoder(
-            model_name=cfg.visual_encoder.face_encoder.model_name,
-            n_temporal_frames=cfg.visual_encoder.face_encoder.dual_view.temporal.n_frames,
-            target_size=tuple(cfg.visual_encoder.face_encoder.target_size),
-            device=device,
-        )
+        from vie_gameemo.encoders import get_face_encoder
+        logger.info("Loading face encoder (backend=%s)...",
+                    getattr(cfg.visual_encoder.face_encoder, "backend", "vit"))
+        encoders["face"] = get_face_encoder(cfg, device=device)
 
     if "context" in args.modalities:
         from vie_gameemo.encoders import get_context_encoder

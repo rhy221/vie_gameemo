@@ -311,7 +311,14 @@ visual_encoder:
 
   # Path 1: face encoder (streamer face only)
   face_encoder:
-    model_name: "trpakov/vit-face-expression"   # ViT-FER, pretrain AffectNet
+    backend: "vit"                # "vit" (default) | "vit_multi" (broader-data FER fine-tune, see models below)
+    model_name: "trpakov/vit-face-expression"   # ViT-FER, pretrain AffectNet (used when backend="vit"
+                                                 # and `models.<backend>` below is unset)
+    # Per-backend checkpoint, keyed by `backend` above (mirrors context_encoder.models).
+    # Both are ViT-Base, 768d — no fusion changes needed to swap between them.
+    models:
+      vit: "trpakov/vit-face-expression"          # FER2013-only fine-tune (current default)
+      vit_multi: "mo-thecreator/vit-Facial-Expression-Recognition"   # FER2013 + MMI + AffectNet, ~84% self-reported acc
     crop_margin: 0.2             # 20% expand around detected face
     target_size: [224, 224]
     dual_view:
