@@ -111,10 +111,12 @@ def main() -> int:
     if raw_augment_cfg is not None and getattr(raw_augment_cfg, "mode", "none") == "precomputed":
         precomputed_copies = getattr(raw_augment_cfg, "precomputed_copies", 5)
 
+    merge_mode = getattr(cfg.labeling, "merge_mode", "none")
     train_ds = VieGameEmoDataset(
         annotations_dir=Path(cfg.paths.annotations),
         features_dir=Path(cfg.paths.features),
         split="train",
+        merge_mode=merge_mode,
         split_manifest=split_manifest if split_manifest.exists() else None,
         zero_modalities=zero_mods,
         precomputed_augment_copies=precomputed_copies,
@@ -123,6 +125,7 @@ def main() -> int:
         annotations_dir=Path(cfg.paths.annotations),
         features_dir=Path(cfg.paths.features),
         split="val",
+        merge_mode=merge_mode,
         split_manifest=split_manifest if split_manifest.exists() else None,
         zero_modalities=zero_mods,
         precomputed_augment_copies=precomputed_copies,

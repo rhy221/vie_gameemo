@@ -30,6 +30,71 @@ class EmotionLabel(str, Enum):
     DISGUSTED = "disgusted"    # 7 — revulsion, cringe, contempt
 
 
+#: Valid values for `config.yaml`'s `labeling.merge_mode`.
+LABEL_MERGE_MODES = ("none", "merge_hype_amused", "amused_as_happy")
+
+
+def resolve_labels(merge_mode: str = "none") -> tuple[list[str], dict[str, int]]:
+    """Resolve training class names + raw-label→index mapping for a merge mode.
+
+    `EmotionLabel` (gaming_8, 8 classes) stays the single source of truth for
+    what's actually stored in annotation JSON / cached features — raw labels
+    are never rewritten. This function only controls how those 8 raw labels
+    get folded into training target indices, so switching modes never
+    requires re-annotating or re-extracting features.
+
+    Modes:
+        "none" (default): gaming_8 unchanged — 8 classes, identity mapping.
+        "amused_as_happy": still 8 classes, same indices as "none" — only the
+            display name for index 2 changes from "amused" to "happy" (hype
+            stays a separate class). Cached features/checkpoints trained
+            under "none" remain valid under this mode (same n_classes, same
+            index assignment) — only display/log strings differ.
+        "merge_hype_amused": 7 classes — "hype" and "amused" both map to a
+            single "happy" index; tilted..disgusted shift down by one index
+            relative to "none". n_classes changes, so this requires
+            retraining from scratch (Stage 1 perception onward) — a
+            checkpoint trained under "none"/"amused_as_happy" is NOT
+            compatible (classifier output layer shape differs).
+
+    Args:
+        merge_mode: One of `LABEL_MERGE_MODES`.
+
+    Returns:
+        (class_names, label_to_idx): `class_names` is the ordered list of
+        training class names (length = n_classes for that mode).
+        `label_to_idx` maps each raw `EmotionLabel.value` string to its
+        training class index under this mode.
+
+    Raises:
+        ValueError: If `merge_mode` is not a recognized value.
+    """
+    if merge_mode == "none":
+        class_names = [e.value for e in EmotionLabel]
+        label_to_idx = {e.value: i for i, e in enumerate(EmotionLabel)}
+    elif merge_mode == "amused_as_happy":
+        class_names = [e.value for e in EmotionLabel]
+        class_names[class_names.index("amused")] = "happy"
+        label_to_idx = {e.value: i for i, e in enumerate(EmotionLabel)}
+    elif merge_mode == "merge_hype_amused":
+        class_names = ["neutral", "happy", "tilted", "sad", "shocked", "fear", "disgusted"]
+        label_to_idx = {
+            "neutral": 0,
+            "hype": 1,
+            "amused": 1,
+            "tilted": 2,
+            "sad": 3,
+            "shocked": 4,
+            "fear": 5,
+            "disgusted": 6,
+        }
+    else:
+        raise ValueError(
+            f"Unknown labeling.merge_mode '{merge_mode}'. Available: {LABEL_MERGE_MODES}"
+        )
+    return class_names, label_to_idx
+
+
 class EkmanLabel(str, Enum):
     """Ekman 7 emotion labels (alternative schema for ablation)."""
     VUI = "vui"

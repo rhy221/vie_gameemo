@@ -108,6 +108,7 @@ def _run_eval(cfg, args) -> dict:
 
     from vie_gameemo.classifiers import get_classifier
     from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn, zero_modalities_for_strategy
+    from vie_gameemo.data.schemas import resolve_labels
     from vie_gameemo.evaluation.metrics import compute_metrics
     from vie_gameemo.evaluation.per_genre import per_genre_metrics
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
@@ -169,6 +170,7 @@ def _run_eval(cfg, args) -> dict:
         annotations_dir=annotations_dir,
         features_dir=Path(cfg.paths.features),
         split=args.split,
+        merge_mode=getattr(cfg.labeling, "merge_mode", "none"),
         split_manifest=splits_path if splits_path.exists() else None,
         zero_modalities=zero_mods,
     )
@@ -211,10 +213,11 @@ def _run_eval(cfg, args) -> dict:
                     "y_pred": int(preds[i].item()),
                 })
 
+    class_names = resolve_labels(getattr(cfg.labeling, "merge_mode", "none"))[0]
     metrics = compute_metrics(
         all_labels, all_preds,
         n_classes=ccfg.n_classes,
-        label_names=_EMOTION_LABELS,
+        label_names=class_names,
     )
     cm = metrics.pop("confusion_matrix").tolist()
     metrics["confusion_matrix"] = cm
@@ -224,8 +227,8 @@ def _run_eval(cfg, args) -> dict:
     for m in all_meta:
         predictions.append({
             "clip_id": m["clip_id"],
-            "gt": _EMOTION_LABELS[m["y_true"]] if m["y_true"] < len(_EMOTION_LABELS) else str(m["y_true"]),
-            "pred": _EMOTION_LABELS[m["y_pred"]] if m["y_pred"] < len(_EMOTION_LABELS) else str(m["y_pred"]),
+            "gt": class_names[m["y_true"]] if m["y_true"] < len(class_names) else str(m["y_true"]),
+            "pred": class_names[m["y_pred"]] if m["y_pred"] < len(class_names) else str(m["y_pred"]),
             "correct": m["y_true"] == m["y_pred"],
         })
 
@@ -319,9 +322,12 @@ def _run_fusion_ablation(cfg, output_dir: Path) -> dict:
         annotations_dir = Path(cfg.paths.annotations)
         splits_path = Path(getattr(cfg.paths, "split_manifest", "data/splits.json"))
 
+        merge_mode = getattr(cfg.labeling, "merge_mode", "none")
         train_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "train",
+                                     merge_mode=merge_mode,
                                      split_manifest=splits_path if splits_path.exists() else None)
         val_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "val",
+                                   merge_mode=merge_mode,
                                    split_manifest=splits_path if splits_path.exists() else None)
 
         bs = sub_cfg.training.perception.batch_size
@@ -343,9 +349,12 @@ def _run_fusion_ablation(cfg, output_dir: Path) -> dict:
             cls_m = get_classifier(ccfg, d_model=fcfg.d_model, device=device)
             load_checkpoint(ckpt, fusion_m, cls_m)
             test_ds = VieGameEmoDataset(annotations_dir, Path(cfg.paths.features), "test",
+                                        merge_mode=merge_mode,
                                         split_manifest=splits_path if splits_path.exists() else None)
             test_loader = DataLoader(test_ds, batch_size=bs, shuffle=False, collate_fn=collate_fn)
-            metrics = evaluate(fusion_m, cls_m, test_loader, device, ccfg.n_classes)
+            from vie_gameemo.data.schemas import resolve_labels
+            metrics = evaluate(fusion_m, cls_m, test_loader, device, ccfg.n_classes,
+                              class_names=resolve_labels(merge_mode)[0])
             metrics.pop("confusion_matrix", None)
             results[fusion_type] = metrics
         except Exception as exc:

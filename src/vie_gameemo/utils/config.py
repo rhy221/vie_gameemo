@@ -61,6 +61,7 @@ def load_config(
 
     _validate_required(base)
     _resolve_paths(base, config_path.parent)
+    _apply_labeling_derivations(base)
 
     return dict_to_namespace(base)
 
@@ -155,3 +156,51 @@ def _resolve_paths(d: dict, project_root: Path) -> None:
             p = Path(log_file)
             if not p.is_absolute():
                 d["logging"]["file"] = str(project_root / p)
+
+
+def _apply_labeling_derivations(d: dict) -> None:
+    """Derive `classifier.n_classes` from `labeling.merge_mode` (single
+    source of truth — see `vie_gameemo.data.schemas.resolve_labels`), and
+    reject config combinations whose class-index assumptions would silently
+    break under a non-default merge mode.
+
+    Args:
+        d: Config dict (mutated in place — sets/overwrites classifier.n_classes).
+
+    Raises:
+        ValueError: If `merge_mode` is not recognized, or if a non-"none"
+            merge_mode is combined with `classifier.hierarchical.enabled=true`
+            or `classifier.augment.fused_mixup=true` + `rare_classes` set —
+            both hardcode gaming_8's 8-class index order (easy_idx/hard_idx,
+            rare_classes) and would silently mis-partition or index out of
+            range under a merged schema.
+    """
+    from vie_gameemo.data.schemas import resolve_labels
+
+    merge_mode = d.get("labeling", {}).get("merge_mode", "none")
+    class_names, _ = resolve_labels(merge_mode)
+
+    classifier = d.setdefault("classifier", {})
+    classifier["n_classes"] = len(class_names)
+
+    if merge_mode == "none":
+        return
+
+    hierarchical = classifier.get("hierarchical", {})
+    if hierarchical.get("enabled", False):
+        raise ValueError(
+            f"labeling.merge_mode='{merge_mode}' is incompatible with "
+            "classifier.hierarchical.enabled=true — easy_idx/hard_idx are "
+            "hardcoded to gaming_8's 8-class index order. Set "
+            "classifier.hierarchical.enabled=false or labeling.merge_mode='none'."
+        )
+
+    augment = classifier.get("augment", {})
+    if augment.get("fused_mixup", False) and augment.get("rare_classes"):
+        raise ValueError(
+            f"labeling.merge_mode='{merge_mode}' is incompatible with "
+            "classifier.augment.fused_mixup=true + rare_classes set — "
+            "rare_classes indices are hardcoded to gaming_8's 8-class index "
+            "order. Set fused_mixup=false, clear rare_classes, or "
+            "labeling.merge_mode='none'."
+        )

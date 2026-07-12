@@ -16,11 +16,10 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset
 
-from vie_gameemo.data.schemas import Annotation, EmotionLabel
+from vie_gameemo.data.schemas import Annotation, EmotionLabel, resolve_labels
 
 logger = logging.getLogger(__name__)
 
-_LABEL_TO_IDX: dict[str, int] = {e.value: i for i, e in enumerate(EmotionLabel)}
 _SPLIT_KEY = "split"
 
 
@@ -33,6 +32,10 @@ class VieGameEmoDataset(Dataset):
         split: 'train' | 'val' | 'test_id' | 'test_ood'.
         mode: 'cached' (load .pt) | 'raw' (encode on-the-fly, needs encoders).
         label_schema: 'gaming_8' | 'ekman_7'.
+        merge_mode: One of `vie_gameemo.data.schemas.LABEL_MERGE_MODES` — controls
+            how the 8 raw gaming_8 labels fold into training class indices
+            (see `resolve_labels`). Must match `classifier.n_classes` for the
+            checkpoint being trained/evaluated.
         split_manifest: Optional path to a JSON mapping clip_id → split name.
             If None, a manifest is created from all annotations with a default split.
     """
@@ -44,6 +47,7 @@ class VieGameEmoDataset(Dataset):
         split: str = "train",
         mode: str = "cached",
         label_schema: str = "gaming_8",
+        merge_mode: str = "none",
         split_manifest: Path | None = None,
         zero_modalities: list[str] | None = None,
         precomputed_augment_copies: int = 0,
@@ -53,6 +57,8 @@ class VieGameEmoDataset(Dataset):
         self.split = split
         self.mode = mode
         self.label_schema = label_schema
+        self.merge_mode = merge_mode
+        self.class_names, self._label_to_idx = resolve_labels(merge_mode)
         # Modalities to zero at load time (strategy masking, not baked into cache).
         # e.g. ['context'] for face_only, [] for dual_path/full_frame.
         self.zero_modalities: frozenset[str] = frozenset(zero_modalities or [])
@@ -100,7 +106,7 @@ class VieGameEmoDataset(Dataset):
                 self.items.append({
                     "clip_id": clip_id,
                     "ann_path": ann_file,
-                    "label": _LABEL_TO_IDX.get(ann.emotion_label.value, 0),
+                    "label": self._label_to_idx.get(ann.emotion_label.value, 0),
                     "has_face": ann.webcam_bbox is not None,
                     "reasoning_text": getattr(ann, "reasoning", ""),
                     "audio_desc": getattr(ann, "audio_tone_desc", ""),

@@ -229,6 +229,30 @@ annotation:
 # Labeling schemas (try both in ablation)
 labeling:
   primary_schema: "gaming_8"   # "ekman_7" or "gaming_8"
+
+  # Controls how the 8 raw gaming_8 labels fold into TRAINING class indices
+  # (see vie_gameemo.data.schemas.resolve_labels — single source of truth,
+  # read by VieGameEmoDataset and load_config, which derives classifier.n_classes
+  # from this automatically). Raw annotations/cached features are never
+  # rewritten — this only changes label→index mapping at train/eval time.
+  #   "none"              (default): gaming_8 unchanged, 8 classes.
+  #   "amused_as_happy"             : still 8 classes, same indices — only
+  #                                   "amused" is displayed/logged as "happy".
+  #                                   Checkpoints trained under "none" remain
+  #                                   valid (n_classes unchanged).
+  #   "merge_hype_amused"           : 7 classes — "hype" + "amused" merge into
+  #                                   "happy"; tilted..disgusted shift down by
+  #                                   one index. classifier.n_classes changes,
+  #                                   so this REQUIRES retraining Stage 1 from
+  #                                   scratch — not compatible with existing
+  #                                   checkpoints. Also incompatible with
+  #                                   classifier.hierarchical.easy_idx/hard_idx
+  #                                   and classifier.augment.rare_classes,
+  #                                   which are hardcoded to gaming_8's 8-index
+  #                                   order — load_config raises if you combine
+  #                                   this mode with either of those set.
+  merge_mode: "none"   # "none" | "amused_as_happy" | "merge_hype_amused"
+
   schemas:
     ekman_7:
       labels: ["vui", "buon", "tuc_gian", "so_hai", "ngac_nhien", "ghe_tom", "trung_tinh"]

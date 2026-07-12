@@ -52,6 +52,7 @@ def train_perception(
     """
     from vie_gameemo.classifiers import get_classifier
     from vie_gameemo.data.feature_extraction import apply_online_augment, build_online_augment_context
+    from vie_gameemo.data.schemas import resolve_labels
     from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.losses import (
         build_classification_criterion,
@@ -280,6 +281,7 @@ def train_perception(
             fusion=fusion, classifier=classifier, loader=val_loader,
             device=device, n_classes=ccfg.n_classes,
             return_predictions=True,
+            class_names=resolve_labels(getattr(cfg.labeling, "merge_mode", "none"))[0],
         )
         macro_f1 = val_metrics["macro_f1"]
         logger.info(
@@ -325,6 +327,7 @@ def evaluate(
     device: torch.device,
     n_classes: int,
     return_predictions: bool = False,
+    class_names: list[str] | None = None,
 ) -> dict:
     """Evaluate fusion+classifier on a loader.
 
@@ -335,6 +338,11 @@ def evaluate(
         device: Torch device.
         n_classes: Number of emotion classes.
         return_predictions: If True, include per-sample predictions in output.
+        class_names: Ordered class display names (length n_classes). Defaults
+            to gaming_8 unmerged (`resolve_labels("none")`) if not given —
+            pass `resolve_labels(cfg.labeling.merge_mode)[0]` when evaluating
+            under a non-default merge mode so per-class names/predictions
+            reflect it (e.g. "happy" instead of "amused").
 
     Returns:
         Dict with keys: 'accuracy', 'macro_f1', 'weighted_f1', 'uar'.
@@ -372,7 +380,7 @@ def evaluate(
                 all_clip_ids.extend([""] * len(labels))
 
     from vie_gameemo.training.losses import per_class_metrics as compute_per_class
-    from vie_gameemo.data.schemas import EmotionLabel
+    from vie_gameemo.data.schemas import resolve_labels
 
     accuracy = sum(p == l for p, l in zip(all_preds, all_labels)) / max(1, len(all_labels))
     macro_f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
@@ -381,7 +389,8 @@ def evaluate(
     from sklearn.metrics import recall_score
     uar = recall_score(all_labels, all_preds, average="macro", zero_division=0)
 
-    class_names = [e.value for e in EmotionLabel]
+    if class_names is None:
+        class_names = resolve_labels("none")[0]
     detailed = compute_per_class(all_preds, all_labels, n_classes, class_names)
 
     result = {
