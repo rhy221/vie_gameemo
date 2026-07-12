@@ -166,11 +166,20 @@ def get_face_encoder(cfg, device: str | torch.device = "cuda") -> nn.Module:
     # (and thus total_tokens / cached feature shapes) for anyone already relying
     # on the current default. Left as a known gap, not fixed here.
 
+    # dual_view.global.source selects peak-frame/global-CLS strategy — see
+    # FaceEncoder's peak_frame_source docstring. "auto_peak" (default, current
+    # behavior since commit fef0294) if unset; set to "middle_frame" in
+    # config.yaml to reproduce the pre-fef0294 behavior for checkpoints
+    # trained before that change.
+    global_cfg = getattr(getattr(face_cfg, "dual_view", None), "global", None)
+    peak_frame_source = getattr(global_cfg, "source", "auto_peak") if global_cfg else "auto_peak"
+
     return FaceEncoder(
         model_name=model_name,
         backend=backend,
         n_temporal_frames=n_temporal_frames,
         target_size=tuple(getattr(face_cfg, "target_size", (224, 224)) if face_cfg is not None else (224, 224)),
+        peak_frame_source=peak_frame_source,
         device=device,
     )
 

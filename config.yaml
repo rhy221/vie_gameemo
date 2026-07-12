@@ -347,7 +347,18 @@ visual_encoder:
     target_size: [224, 224]
     dual_view:
       global:
-        source: "middle_frame"   # heuristic: peak emotion often mid-clip
+        # Peak-frame + global-CLS strategy for FaceEncoder (see face_vit.py
+        # FaceEncoder.peak_frame_source docstring):
+        #   "middle_frame" (legacy, pre-fef0294): fixed middle-of-clip frame,
+        #     global CLS = that frame's own CLS. Set this to match a
+        #     checkpoint trained before commit fef0294 ("fix face").
+        #   "auto_peak" (current default if unset): peak frame picked by
+        #     content (most different from clip mean); global CLS = mean of
+        #     all temporal CLS tokens.
+        # Changing this changes cached "face" feature CONTENT, not just
+        # shape — extract_features.py cannot detect the mismatch on its own
+        # (see _config_hash), so re-extract explicitly after changing it.
+        source: "middle_frame"   # kept at legacy value to match the currently trained checkpoint
       temporal:
         n_frames: 16             # sweet spot per spec ablation
         spatial_pool: [2, 2]     # 2x2 → 64 tokens/frame

@@ -48,6 +48,7 @@ class FaceEncoder(nn.Module):
         n_temporal_frames: int = 16,
         spatial_pool: tuple[int, int] = (4, 4),
         target_size: tuple[int, int] = (224, 224),
+        peak_frame_source: str = "auto_peak",
         device: str | torch.device = "cuda",
     ) -> None:
         """Initialize face encoder.
@@ -61,6 +62,18 @@ class FaceEncoder(nn.Module):
             n_temporal_frames: Frames sampled for temporal view.
             spatial_pool: (H, W) pooling on peak frame patch grid.
             target_size: Input frame resize target (W, H).
+            peak_frame_source: How the peak frame (spatial-patch view) and
+                global-CLS view are picked — see `visual_encoder.face_encoder.
+                dual_view.global.source` in config.yaml:
+                  - "auto_peak" (default): peak frame chosen by
+                    `_select_peak_frame` (most different from the clip's mean
+                    appearance); global CLS = mean of all temporal CLS tokens.
+                  - "middle_frame" (legacy, pre-fef0294 behavior): peak frame
+                    = fixed middle-of-clip index; global CLS = that same
+                    frame's own CLS token. Changing this value changes the
+                    cached "face" feature's content (not just its shape), so
+                    a checkpoint trained under one setting should be
+                    evaluated with the SAME setting, not the other.
             device: Torch device.
         """
         super().__init__()
@@ -69,6 +82,12 @@ class FaceEncoder(nn.Module):
         self.n_temporal_frames = n_temporal_frames
         self.spatial_pool = spatial_pool
         self.target_size = target_size
+        if peak_frame_source not in ("auto_peak", "middle_frame"):
+            raise ValueError(
+                f"Unknown peak_frame_source: {peak_frame_source!r}. "
+                "Use 'auto_peak' or 'middle_frame'."
+            )
+        self.peak_frame_source = peak_frame_source
         self.device = torch.device(device)
 
         logger.info("Loading ViT-FER (backend=%s): %s", backend, model_name)
@@ -125,15 +144,22 @@ class FaceEncoder(nn.Module):
 
         frames_pil = [_bgr_to_pil(f) for f in usable_crops]
 
-        # Peak frame: pick the frame most different from the clip's mean
-        # appearance (no ground-truth peak label exists — see peak_frame_idx
-        # in Annotation, which is a hardcoded 0 for imported labels, not a
-        # real detected peak). Used ONLY for the fine-grained spatial patch
-        # view below — a single frame is still needed for spatial detail,
-        # and computing full patch-level hidden states for every temporal
-        # frame would be far more expensive for uncertain benefit.
-        peak_idx = _select_peak_frame(frames_pil)
-        _, peak_patches = self._encode_full_frame(frames_pil[peak_idx])
+        # Peak frame: source depends on self.peak_frame_source (see __init__
+        # docstring). "auto_peak" picks the frame most different from the
+        # clip's mean appearance (no ground-truth peak label exists — see
+        # peak_frame_idx in Annotation, which is a hardcoded 0 for imported
+        # labels, not a real detected peak). "middle_frame" reproduces the
+        # pre-fef0294 behavior (fixed middle-of-clip index) for compatibility
+        # with checkpoints trained before that change. Used for the
+        # fine-grained spatial patch view below — a single frame is still
+        # needed for spatial detail, and computing full patch-level hidden
+        # states for every temporal frame would be far more expensive for
+        # uncertain benefit.
+        if self.peak_frame_source == "middle_frame":
+            peak_idx = len(frames_pil) // 2
+        else:
+            peak_idx = _select_peak_frame(frames_pil)
+        peak_cls, peak_patches = self._encode_full_frame(frames_pil[peak_idx])
 
         # Spatial pool patch tokens for detail
         pooled_patches = self._spatial_pool_patches(
@@ -146,13 +172,16 @@ class FaceEncoder(nn.Module):
             [self._encode_single_frame(f) for f in sampled], dim=0
         )  # (n_temporal_frames, 768)
 
-        # Global view: mean over the temporal CLS tokens instead of a single
-        # peak frame's CLS. Reduces reliance on any one (possibly
+        # Global view: "middle_frame" reuses the peak frame's own CLS token
+        # (legacy behavior — peak_idx is the middle frame in this mode, so
+        # this matches pre-fef0294 exactly). "auto_peak" instead means over
+        # the temporal CLS tokens, reducing reliance on any one (possibly
         # mis-selected) frame for the coarse "global" signal — mirrors
-        # Emotion-LLaMA-v2's adaptive pooling over uniformly-sampled frames
-        # rather than a single-frame global token. Free: temporal_cls is
-        # already computed for the temporal view below.
-        global_cls = temporal_cls.mean(dim=0, keepdim=True)  # (1, 768)
+        # Emotion-LLaMA-v2's adaptive pooling over uniformly-sampled frames.
+        if self.peak_frame_source == "middle_frame":
+            global_cls = peak_cls  # (1, 768)
+        else:
+            global_cls = temporal_cls.mean(dim=0, keepdim=True)  # (1, 768)
         temporal_cls = temporal_cls.unsqueeze(0)  # (1, n_temporal, 768)
 
         # [peak_patches | global_CLS | temporal_CLS]

@@ -57,14 +57,28 @@ def parse_args() -> argparse.Namespace:
              "the source .mp4 (librosa decodes it via ffmpeg).",
     )
     parser.add_argument(
-        "--augment-copies", type=int, default=0,
+        "--augment-copies", type=int, default=None,
         help="Precomputed raw-augmentation mode (config: augment.raw.*): for "
              "each clip, additionally cache N randomly-augmented variants "
-             "({clip_id}_aug{i}.pt, color/crop jitter for face+context, "
-             "pitch-shift/time-stretch/noise/SpecAugment for audio) alongside "
-             "the original. VieGameEmoDataset randomly picks among all cached "
-             "variants each epoch when raw_augment.mode='precomputed'. 0 "
-             "(default) caches only the original, unaugmented features.",
+             "({clip_id}_aug{i}.pt, saved in the SAME features dir as the "
+             "original — no separate folder; color/crop jitter for "
+             "face+context, pitch-shift/time-stretch/noise/SpecAugment for "
+             "audio) alongside the original. VieGameEmoDataset randomly picks "
+             "among all cached variants each epoch when "
+             "augment.raw.mode='precomputed'. Default (omit this flag): use "
+             "augment.raw.precomputed_copies from --config if "
+             "augment.raw.mode=='precomputed', else 0. Pass explicitly to "
+             "override the config value.",
+    )
+    parser.add_argument(
+        "--augment-only", action="store_true",
+        help="Only (re)generate the {clip_id}_aug{i}.pt precomputed-augmentation "
+             "variants — never touch/recompute the base {clip_id}.pt, regardless "
+             "of --overwrite. Requires --augment-copies > 0 (or "
+             "augment.raw.mode='precomputed' in --config). Clips with no "
+             "existing base {clip_id}.pt are skipped with a warning (base must "
+             "be extracted first). Use this to add/refresh augmented copies "
+             "without paying encoder compute for unchanged original features.",
     )
     return parser.parse_args()
 
@@ -92,6 +106,11 @@ def _config_hash(cfg) -> str:
     face_cfg = cfg.visual_encoder.face_encoder
     face_backend = getattr(face_cfg, "backend", "vit")
     face_key = f"{face_backend}:{resolve_face_model_name(face_cfg, face_backend)}"
+    # dual_view.global.source changes cached "face" feature CONTENT (peak-frame
+    # selection + global-CLS strategy — see FaceEncoder.peak_frame_source),
+    # not just the checkpoint name, so it must be part of the hash too.
+    face_global_cfg = getattr(getattr(face_cfg, "dual_view", None), "global", None)
+    face_peak_source = getattr(face_global_cfg, "source", "auto_peak") if face_global_cfg else "auto_peak"
 
     relevant = {
         "audio_type": getattr(cfg.audio_encoder, "type", "whisper"),
@@ -99,6 +118,7 @@ def _config_hash(cfg) -> str:
         "audio_tokens": cfg.audio_encoder.target_tokens,
         "audio_d_out": getattr(cfg.audio_encoder, "d_out", None),
         "face": face_key,
+        "face_peak_source": face_peak_source,
         "context": ctx_key,
         "text": getattr(cfg.text_encoder, "model", getattr(cfg.text_encoder, "model_name", "unknown")),
         "text_backend": getattr(cfg.text_encoder, "backend", getattr(cfg.text_encoder, "type", "xlmr")),
@@ -121,6 +141,36 @@ def main() -> int:
     if args.limit:
         annotation_files = annotation_files[:args.limit]
     logger.info("Extracting features for %d clips → %s", len(annotation_files), features_dir)
+
+    # Resolve --augment-copies: explicit CLI value wins; otherwise fall back to
+    # config.yaml's augment.raw.precomputed_copies (only if mode="precomputed"),
+    # so setting mode+precomputed_copies in config.yaml alone is enough without
+    # ALSO having to remember to pass --augment-copies on the command line.
+    if args.augment_copies is not None:
+        augment_copies = args.augment_copies
+    else:
+        raw_cfg = getattr(getattr(cfg, "augment", None), "raw", None)
+        if raw_cfg is not None and getattr(raw_cfg, "mode", "none") == "precomputed":
+            augment_copies = getattr(raw_cfg, "precomputed_copies", 5)
+        else:
+            augment_copies = 0
+
+    if args.augment_only and augment_copies <= 0:
+        raise ValueError(
+            "--augment-only requires --augment-copies > 0 (or "
+            "augment.raw.mode='precomputed' with precomputed_copies > 0 in "
+            "--config) — nothing to generate otherwise."
+        )
+
+    image_aug_fn, audio_aug_fn = (None, None)
+    if augment_copies > 0:
+        image_aug_fn, audio_aug_fn = build_augment_fns(cfg)
+        logger.info(
+            "Precomputed raw-augmentation ON: caching %d extra variant(s)/clip "
+            "as {clip_id}_aug{i}.pt in the SAME features dir (%s) — no separate "
+            "folder. image_aug=%s, audio_aug=%s",
+            augment_copies, features_dir, image_aug_fn is not None, audio_aug_fn is not None,
+        )
 
     device = torch.device(
         cfg.compute.device if cfg.compute.device != "auto"
@@ -178,7 +228,14 @@ def main() -> int:
         clip_id = ann_file.stem
         pt_path = features_dir / f"{clip_id}.pt"
 
-        if not args.overwrite and pt_path.exists():
+        if args.augment_only:
+            if not pt_path.exists():
+                logger.warning(
+                    "--augment-only: no base cache for %s — skipping "
+                    "(extract the base %s.pt first)", clip_id, clip_id,
+                )
+                continue
+        elif not args.overwrite and pt_path.exists():
             logger.debug("Cache exists (skip): %s", clip_id)
             n_done += 1
             continue
@@ -195,26 +252,28 @@ def main() -> int:
         frame_dir = Path(cfg.paths.frames) / clip_id
         frame_paths = sorted(frame_dir.glob("frame_*.jpg")) if frame_dir.exists() else []
 
-        features = extract_clip_features(
-            cfg, encoders, clip_id, ann, resolved_bbox, has_face, frame_paths,
-            strategy, video_index, logger,
-        )
+        if not args.augment_only:
+            features = extract_clip_features(
+                cfg, encoders, clip_id, ann, resolved_bbox, has_face, frame_paths,
+                strategy, video_index, logger,
+            )
 
-        # Merge with existing cache if only extracting a subset of modalities
-        pt_path = features_dir / f"{clip_id}.pt"
-        if pt_path.exists() and set(args.modalities) != {"audio", "face", "context", "text"}:
-            existing = torch.load(pt_path, map_location="cpu", weights_only=False)
-            existing.update(features)
-            features = existing
+            # Merge with existing cache if only extracting a subset of modalities
+            if pt_path.exists() and set(args.modalities) != {"audio", "face", "context", "text"}:
+                existing = torch.load(pt_path, map_location="cpu", weights_only=False)
+                existing.update(features)
+                features = existing
 
-        cache_features(clip_id, features, features_dir, overwrite=True,
-                       config_hash=cfg_hash)
-        n_done += 1
-        logger.info("[%d/%d] Cached: %s", n_done, len(annotation_files), clip_id)
+            cache_features(clip_id, features, features_dir, overwrite=True,
+                           config_hash=cfg_hash)
+            n_done += 1
+            logger.info("[%d/%d] Cached: %s", n_done, len(annotation_files), clip_id)
+        else:
+            n_done += 1
+            logger.debug("--augment-only: base cache kept as-is for %s", clip_id)
 
-        if args.augment_copies > 0:
-            image_aug_fn, audio_aug_fn = build_augment_fns(cfg)
-            for i in range(args.augment_copies):
+        if augment_copies > 0:
+            for i in range(augment_copies):
                 aug_id = f"{clip_id}_aug{i}"
                 aug_pt_path = features_dir / f"{aug_id}.pt"
                 if not args.overwrite and aug_pt_path.exists():
@@ -226,7 +285,7 @@ def main() -> int:
                 )
                 cache_features(aug_id, aug_features, features_dir, overwrite=True,
                                config_hash=cfg_hash)
-                logger.info("  + augmented variant %d/%d cached: %s", i + 1, args.augment_copies, aug_id)
+                logger.info("  + augmented variant %d/%d cached: %s", i + 1, augment_copies, aug_id)
 
     logger.info("Feature extraction complete. %d clips cached.", n_done)
     return 0
