@@ -261,6 +261,60 @@ def fused_mixup(
     return mixed, labels, labels[perm], lam
 
 
+def hard_pair_margin_loss(
+    embeddings: Tensor,
+    labels: Tensor,
+    pair_indices: list[tuple[int, int]],
+    margin: float = 0.3,
+) -> Tensor:
+    """Pairwise cosine-margin repulsion loss for specific hard-confusable class pairs.
+
+    Pushes embeddings of two frequently-confused classes apart in cosine
+    space whenever both appear in the same batch — a targeted alternative to
+    blind class reweighting (`make_class_weights` / focal loss) for
+    confusions that come from genuine semantic/acoustic overlap between
+    SPECIFIC class pairs rather than from class frequency (e.g. a small class
+    like "disgusted" can still get a high F1 while a larger class like
+    "shocked" scores low, if "shocked" specifically overlaps with "hype"
+    (both high-arousal exclamatory reactions) and "neutral" (under-detected
+    when the startle signal is brief/subtle) — reweighting by frequency alone
+    doesn't target that).
+
+    Args:
+        embeddings: (B, D) pooled fused embeddings — caller mean-pools the
+            (B, T, D) fused tensor over T before calling this (see
+            `train_perception`).
+        labels: (B,) integer class indices.
+        pair_indices: List of (class_a, class_b) index pairs to repel.
+        margin: Cosine-similarity margin — pairs already below this
+            contribute zero loss (already "far enough apart"; this avoids a
+            degenerate "push everything to opposite ends" collapse).
+
+    Returns:
+        Scalar loss (0.0 tensor, still on `embeddings`' device/dtype, if no
+        pair has both classes present in the batch — safe to add to the
+        main loss unconditionally).
+    """
+    if not pair_indices:
+        return embeddings.new_zeros(())
+
+    z = F.normalize(embeddings, p=2, dim=-1)
+    total = embeddings.new_zeros(())
+    n_terms = 0
+    for cls_a, cls_b in pair_indices:
+        idx_a = (labels == cls_a).nonzero(as_tuple=True)[0]
+        idx_b = (labels == cls_b).nonzero(as_tuple=True)[0]
+        if idx_a.numel() == 0 or idx_b.numel() == 0:
+            continue
+        sim = z[idx_a] @ z[idx_b].T  # (|a|, |b|) pairwise cosine similarities
+        total = total + F.relu(sim - margin).mean()
+        n_terms += 1
+
+    if n_terms == 0:
+        return embeddings.new_zeros(())
+    return total / n_terms
+
+
 def per_class_metrics(
     preds: list[int],
     labels: list[int],

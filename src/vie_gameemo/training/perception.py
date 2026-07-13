@@ -58,6 +58,7 @@ def train_perception(
         build_classification_criterion,
         embedding_augment,
         fused_mixup,
+        hard_pair_margin_loss,
         make_class_weights,
         modality_dropout,
     )
@@ -116,11 +117,39 @@ def train_perception(
     mixup_alpha = getattr(augment_cfg, "mixup_alpha", 0.4) if augment_cfg else 0.4
     mixup_rare_classes = list(getattr(augment_cfg, "rare_classes", [])) if augment_cfg else []
 
+    # Hard-pair margin loss: targeted repulsion for SPECIFIC class pairs that
+    # are confused for reasons other than frequency (see
+    # `hard_pair_margin_loss` docstring). Config:
+    # classifier.augment.hard_pair_margin.{enabled,pairs,margin,weight}.
+    # Disable by setting enabled: false to revert to pre-this-feature training.
+    class_names = resolve_labels(getattr(cfg.labeling, "merge_mode", "none"))[0]
+    name_to_idx = {name: i for i, name in enumerate(class_names)}
+    hard_pair_cfg = getattr(augment_cfg, "hard_pair_margin", None)
+    hard_pair_enabled = getattr(hard_pair_cfg, "enabled", False) if hard_pair_cfg else False
+    hard_pair_margin = getattr(hard_pair_cfg, "margin", 0.3) if hard_pair_cfg else 0.3
+    hard_pair_weight = getattr(hard_pair_cfg, "weight", 0.1) if hard_pair_cfg else 0.1
+    hard_pair_names = list(getattr(hard_pair_cfg, "pairs", [])) if hard_pair_cfg else []
+    hard_pair_indices: list[tuple[int, int]] = []
+    if hard_pair_enabled:
+        for name_a, name_b in hard_pair_names:
+            if name_a not in name_to_idx or name_b not in name_to_idx:
+                logger.warning(
+                    "hard_pair_margin: skipping pair %s — unknown class name "
+                    "under merge_mode=%s (known: %s)",
+                    (name_a, name_b), getattr(cfg.labeling, "merge_mode", "none"), class_names,
+                )
+                continue
+            hard_pair_indices.append((name_to_idx[name_a], name_to_idx[name_b]))
+        if not hard_pair_indices:
+            hard_pair_enabled = False
+
     logger.info(
         "Augmentation config: embedding_augment=%s (noise_std=%.2f, time_mask_p=%.2f), "
-        "modality_dropout=%s (p=%.2f), fused_mixup=%s (alpha=%.2f, rare_classes=%s)",
+        "modality_dropout=%s (p=%.2f), fused_mixup=%s (alpha=%.2f, rare_classes=%s), "
+        "hard_pair_margin=%s (pairs=%s, margin=%.2f, weight=%.2f)",
         emb_aug_enabled, emb_aug_noise_std, emb_aug_time_mask_p,
         mod_dropout_enabled, mod_dropout_p, mixup_enabled, mixup_alpha, mixup_rare_classes,
+        hard_pair_enabled, hard_pair_names, hard_pair_margin, hard_pair_weight,
     )
 
     all_train_labels = [item["label"] for item in train_loader.dataset.items]
@@ -254,6 +283,12 @@ def train_perception(
                 else:
                     logits = classifier(fused)
                     loss = criterion(logits, labels) / grad_accum
+
+                if hard_pair_enabled:
+                    pair_loss = hard_pair_margin_loss(
+                        fused.mean(dim=1), labels, hard_pair_indices, margin=hard_pair_margin,
+                    )
+                    loss = loss + (hard_pair_weight * pair_loss) / grad_accum
 
             if use_amp and amp_dtype == torch.float16:
                 scaler.scale(loss).backward()

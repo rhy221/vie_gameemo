@@ -49,6 +49,7 @@ class FaceEncoder(nn.Module):
         spatial_pool: tuple[int, int] = (4, 4),
         target_size: tuple[int, int] = (224, 224),
         peak_frame_source: str = "auto_peak",
+        peak_signal: str = "visual",
         device: str | torch.device = "cuda",
     ) -> None:
         """Initialize face encoder.
@@ -74,6 +75,16 @@ class FaceEncoder(nn.Module):
                     cached "face" feature's content (not just its shape), so
                     a checkpoint trained under one setting should be
                     evaluated with the SAME setting, not the other.
+            peak_signal: Only relevant when peak_frame_source="auto_peak"
+                (ignored, no-op, under "middle_frame"). Which signal(s)
+                `_select_peak_frame` uses to pick the peak frame:
+                  - "visual" (default): visual distance from the clip's mean
+                    appearance only (original fef0294 behavior).
+                  - "audio_visual": z-scored visual distance + z-scored
+                    per-frame audio RMS energy (see `audio_energy` arg of
+                    `encode`) — catches brief "startle" reactions (e.g. a
+                    quick shocked/gasp) whose peak coincides with a vocal
+                    spike more than with a visually-different frame.
             device: Torch device.
         """
         super().__init__()
@@ -88,6 +99,11 @@ class FaceEncoder(nn.Module):
                 "Use 'auto_peak' or 'middle_frame'."
             )
         self.peak_frame_source = peak_frame_source
+        if peak_signal not in ("visual", "audio_visual"):
+            raise ValueError(
+                f"Unknown peak_signal: {peak_signal!r}. Use 'visual' or 'audio_visual'."
+            )
+        self.peak_signal = peak_signal
         self.device = torch.device(device)
 
         logger.info("Loading ViT-FER (backend=%s): %s", backend, model_name)
@@ -112,6 +128,7 @@ class FaceEncoder(nn.Module):
         self,
         face_crops: list[np.ndarray] | None,
         valid_mask: list[bool] | None = None,
+        audio_energy: np.ndarray | None = None,
     ) -> tuple[Tensor, bool]:
         """Encode a sequence of face crops with tri-view design.
 
@@ -128,6 +145,14 @@ class FaceEncoder(nn.Module):
                 sequence as real face frames and inject non-face signal.
                 If None, or all frames are invalid, all frames are used
                 (matches previous behavior).
+            audio_energy: Optional 1D array, same length as `face_crops`
+                (BEFORE valid_mask filtering — filtered internally the same
+                way), giving a per-frame audio energy value (e.g. short-time
+                RMS uniformly resampled across the clip). Only used when
+                `self.peak_signal == "audio_visual"` (ignored otherwise, and
+                a no-op under `peak_frame_source="middle_frame"` since that
+                mode never calls `_select_peak_frame`). See
+                `feature_extraction._compute_frame_audio_energy`.
 
         Returns:
             Tuple of:
@@ -139,8 +164,12 @@ class FaceEncoder(nn.Module):
             return torch.zeros(1, self.total_tokens, 768, device=self.device), False
 
         usable_crops = face_crops
+        usable_energy = audio_energy
         if valid_mask is not None and len(valid_mask) == len(face_crops) and any(valid_mask):
             usable_crops = [c for c, ok in zip(face_crops, valid_mask) if ok]
+            if usable_energy is not None and len(usable_energy) == len(valid_mask):
+                mask_arr = np.asarray(valid_mask, dtype=bool)
+                usable_energy = np.asarray(usable_energy)[mask_arr]
 
         frames_pil = [_bgr_to_pil(f) for f in usable_crops]
 
@@ -148,17 +177,21 @@ class FaceEncoder(nn.Module):
         # docstring). "auto_peak" picks the frame most different from the
         # clip's mean appearance (no ground-truth peak label exists — see
         # peak_frame_idx in Annotation, which is a hardcoded 0 for imported
-        # labels, not a real detected peak). "middle_frame" reproduces the
-        # pre-fef0294 behavior (fixed middle-of-clip index) for compatibility
-        # with checkpoints trained before that change. Used for the
-        # fine-grained spatial patch view below — a single frame is still
-        # needed for spatial detail, and computing full patch-level hidden
-        # states for every temporal frame would be far more expensive for
-        # uncertain benefit.
+        # labels, not a real detected peak), optionally combined with audio
+        # energy when peak_signal="audio_visual" (see _select_peak_frame).
+        # "middle_frame" reproduces the pre-fef0294 behavior (fixed
+        # middle-of-clip index) for compatibility with checkpoints trained
+        # before that change. Used for the fine-grained spatial patch view
+        # below — a single frame is still needed for spatial detail, and
+        # computing full patch-level hidden states for every temporal frame
+        # would be far more expensive for uncertain benefit.
         if self.peak_frame_source == "middle_frame":
             peak_idx = len(frames_pil) // 2
         else:
-            peak_idx = _select_peak_frame(frames_pil)
+            peak_idx = _select_peak_frame(
+                frames_pil,
+                audio_energy=usable_energy if self.peak_signal == "audio_visual" else None,
+            )
         peak_cls, peak_patches = self._encode_full_frame(frames_pil[peak_idx])
 
         # Spatial pool patch tokens for detail
@@ -265,8 +298,9 @@ def _bgr_to_pil(bgr: np.ndarray) -> Image.Image:
     return Image.fromarray(rgb)
 
 
-def _select_peak_frame(frames_pil: list) -> int:
-    """Pick the frame that deviates most from the clip's mean appearance.
+def _select_peak_frame(frames_pil: list, audio_energy: np.ndarray | None = None) -> int:
+    """Pick the frame that deviates most from the clip's mean appearance,
+    optionally combined with per-frame audio energy.
 
     No reliable ground-truth peak-emotion frame exists for this dataset
     (Annotation.peak_frame_idx is hardcoded to 0 by the flat-label importer,
@@ -277,9 +311,20 @@ def _select_peak_frame(frames_pil: list) -> int:
     proxy for the most expressive moment, and is at least data-driven rather
     than an arbitrary fixed index.
 
+    A visual-only signal misses brief "startle" reactions (a quick gasp/
+    scream) where the most visually-different frame (e.g. a hand suddenly
+    covering the face) isn't the most emotionally-informative one. When
+    `audio_energy` is given, it's combined with the visual distance
+    (z-scored, equal weight, summed) so a frame that's both visually
+    distinctive AND coincides with a vocal spike is preferred.
+
     Args:
         frames_pil: Non-empty list of PIL Images (already filtered to valid
             face crops by the caller).
+        audio_energy: Optional 1D array of length len(frames_pil) — per-frame
+            audio energy (e.g. short-time RMS resampled to one value per
+            frame). If None, or its length doesn't match frames_pil, falls
+            back to visual-only selection.
 
     Returns:
         Index into `frames_pil` of the selected peak frame.
@@ -292,8 +337,17 @@ def _select_peak_frame(frames_pil: list) -> int:
         for f in frames_pil
     ])  # (N, 48, 48)
     mean_thumb = thumbs.mean(axis=0, keepdims=True)
-    dists = np.linalg.norm((thumbs - mean_thumb).reshape(len(frames_pil), -1), axis=1)
-    return int(np.argmax(dists))
+    visual_dist = np.linalg.norm((thumbs - mean_thumb).reshape(len(frames_pil), -1), axis=1)
+
+    if audio_energy is None or len(audio_energy) != len(frames_pil):
+        return int(np.argmax(visual_dist))
+
+    def _zscore(x: np.ndarray) -> np.ndarray:
+        std = float(x.std())
+        return (x - x.mean()) / std if std > 1e-8 else np.zeros_like(x)
+
+    combined = _zscore(visual_dist) + _zscore(np.asarray(audio_energy, dtype=np.float32))
+    return int(np.argmax(combined))
 
 
 def _uniform_sample(frames: list, n: int) -> list:

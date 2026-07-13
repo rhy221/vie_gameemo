@@ -359,6 +359,18 @@ visual_encoder:
         # shape — extract_features.py cannot detect the mismatch on its own
         # (see _config_hash), so re-extract explicitly after changing it.
         source: "middle_frame"   # kept at legacy value to match the currently trained checkpoint
+        # Peak-frame selection signal — only takes effect once `source` above
+        # is switched to "auto_peak" (no-op under "middle_frame", which never
+        # calls the peak-selection heuristic at all). See face_vit.py
+        # FaceEncoder.peak_signal docstring:
+        #   "visual" (revert value): visual distance from the clip's mean
+        #     appearance only (original fef0294 behavior).
+        #   "audio_visual": also uses per-frame audio RMS energy — helps catch
+        #     brief "startle" reactions (e.g. shocked/gasp) whose peak
+        #     coincides with a vocal spike more than a visually-different
+        #     frame. Set here so it's ready for when you retrain with
+        #     source="auto_peak"; dormant for now since source="middle_frame".
+        peak_signal: "audio_visual"
       temporal:
         n_frames: 16             # sweet spot per spec ablation
         spatial_pool: [2, 2]     # 2x2 → 64 tokens/frame
@@ -531,6 +543,22 @@ classifier:
     # classes specifically (disgusted=16, shocked=32 samples in test split).
     # Indices match EmotionLabel order: shocked=5, disgusted=7.
     rare_classes: [5, 7]
+
+    # Targeted hard-negative repulsion for SPECIFIC class pairs confused for
+    # reasons other than frequency (see hard_pair_margin_loss docstring in
+    # training/losses.py). Derived from the test-set confusion analysis:
+    # "shocked" (F1=0.529, lowest despite NOT being the smallest class —
+    # "disgusted" has fewer samples but F1=0.733) is confused with "hype"
+    # (hype→shocked: 6/46, 13% — both high-arousal exclamatory reactions) and
+    # under-detected as "neutral" (shocked→neutral: 7/32, 21.9% — brief/subtle
+    # startle signal). class_weights/focal above only address frequency, not
+    # this kind of semantic/acoustic overlap between specific pairs.
+    # Set enabled: false to revert to pre-this-feature training behavior.
+    hard_pair_margin:
+      enabled: true
+      pairs: [["shocked", "hype"], ["shocked", "neutral"]]
+      margin: 0.3     # cosine-similarity threshold; pairs already below this contribute 0 loss
+      weight: 0.1     # total_loss = classification_loss + weight * hard_pair_margin_loss
 
   # 2-stage hierarchical classifier: Stage A picks easy-vs-hard group, Stage B
   # has one small head per group. Derived from test-set confusion analysis:

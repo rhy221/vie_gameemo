@@ -111,6 +111,7 @@ def _config_hash(cfg) -> str:
     # not just the checkpoint name, so it must be part of the hash too.
     face_global_cfg = getattr(getattr(face_cfg, "dual_view", None), "global", None)
     face_peak_source = getattr(face_global_cfg, "source", "auto_peak") if face_global_cfg else "auto_peak"
+    face_peak_signal = getattr(face_global_cfg, "peak_signal", "visual") if face_global_cfg else "visual"
 
     relevant = {
         "audio_type": getattr(cfg.audio_encoder, "type", "whisper"),
@@ -119,6 +120,7 @@ def _config_hash(cfg) -> str:
         "audio_d_out": getattr(cfg.audio_encoder, "d_out", None),
         "face": face_key,
         "face_peak_source": face_peak_source,
+        "face_peak_signal": face_peak_signal,
         "context": ctx_key,
         "text": getattr(cfg.text_encoder, "model", getattr(cfg.text_encoder, "model_name", "unknown")),
         "text_backend": getattr(cfg.text_encoder, "backend", getattr(cfg.text_encoder, "type", "xlmr")),

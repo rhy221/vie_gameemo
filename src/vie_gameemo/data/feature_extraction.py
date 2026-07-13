@@ -31,6 +31,59 @@ def index_videos(videos_dir: Path) -> dict[str, Path]:
     return index
 
 
+def _compute_frame_audio_energy(
+    cfg, clip_id: str, video_index: dict[str, Path], n_frames: int, logger,
+) -> np.ndarray | None:
+    """Per-frame audio energy profile, for FaceEncoder's peak_signal='audio_visual'.
+
+    Loads the clip's raw waveform (same source resolution as the "audio"
+    modality: cached .wav first, source video as fallback) and computes
+    short-time RMS energy, then resamples it to exactly `n_frames` values via
+    linear interpolation — one energy value per uniformly-spaced sampled
+    frame, matching how `frame_paths` are laid out across the clip duration.
+    Cheap: raw waveform decode only, no model forward pass.
+
+    Args:
+        cfg: Full config namespace (needs cfg.paths.audios).
+        clip_id: Clip identifier.
+        video_index: clip_id → source video path (see `index_videos`); may be
+            empty if audio modality wasn't requested — falls back gracefully.
+        n_frames: Length to resample the RMS envelope to (== len(frame_paths),
+            i.e. before any valid_mask filtering, to stay aligned with the
+            crops/valid_mask lists built by the caller).
+        logger: Logger for a debug message on failure.
+
+    Returns:
+        (n_frames,) float32 array, or None if no audio source is found or it
+        fails to load — callers should treat None as "fall back to
+        visual-only peak selection", not as an error.
+    """
+    if n_frames <= 0:
+        return None
+
+    audio_path = Path(cfg.paths.audios) / f"{clip_id}.wav"
+    source = audio_path if audio_path.exists() else video_index.get(clip_id)
+    if source is None:
+        return None
+
+    try:
+        import librosa
+        wav, sr = librosa.load(str(source), sr=None, mono=True)
+        if wav.size == 0:
+            return None
+        frame_length = max(256, sr // 50)  # ~20ms window
+        hop_length = max(128, frame_length // 2)
+        rms = librosa.feature.rms(y=wav, frame_length=frame_length, hop_length=hop_length)[0]
+        if rms.size == 0:
+            return None
+        x_old = np.linspace(0.0, 1.0, num=rms.size)
+        x_new = np.linspace(0.0, 1.0, num=n_frames)
+        return np.interp(x_new, x_old, rms).astype(np.float32)
+    except Exception as exc:
+        logger.debug("Peak-signal audio energy failed for %s: %s", clip_id, exc)
+        return None
+
+
 def build_augment_fns(cfg) -> tuple[Callable[[np.ndarray], np.ndarray] | None, Callable | None]:
     """Build the image/audio augmentation callables from `cfg.augment.raw`.
 
@@ -142,6 +195,15 @@ def extract_clip_features(
             )
 
     if "face" in encoders:
+        # Only pay the (cheap, but non-zero) raw-waveform decode cost when the
+        # loaded FaceEncoder actually uses it (peak_signal="audio_visual") —
+        # a no-op under the default "visual" signal or "middle_frame" source.
+        face_audio_energy = None
+        if getattr(encoders["face"], "peak_signal", "visual") == "audio_visual":
+            face_audio_energy = _compute_frame_audio_energy(
+                cfg, clip_id, video_index, len(frame_paths), logger,
+            )
+
         if strategy == "full_frame":
             from vie_gameemo.preprocess.face_crop import _tight_face_crop
             crops, valid_mask = [], []
@@ -153,7 +215,9 @@ def extract_clip_features(
                         cropped = image_aug(cropped)
                     crops.append(cropped)
                     valid_mask.append(is_tight_face)
-            feat, _ = encoders["face"].encode(crops if crops else None, valid_mask=valid_mask)
+            feat, _ = encoders["face"].encode(
+                crops if crops else None, valid_mask=valid_mask, audio_energy=face_audio_energy,
+            )
             features["face"] = feat.squeeze(0)
         elif has_face and resolved_bbox is not None and frame_paths:
             from vie_gameemo.preprocess.face_crop import extract_streamer_face
@@ -167,7 +231,9 @@ def extract_clip_features(
                         cropped = image_aug(cropped)
                     crops.append(cropped)
                     valid_mask.append(is_tight_face)
-            feat, _ = encoders["face"].encode(crops if crops else None, valid_mask=valid_mask)
+            feat, _ = encoders["face"].encode(
+                crops if crops else None, valid_mask=valid_mask, audio_energy=face_audio_energy,
+            )
             features["face"] = feat.squeeze(0)
         else:
             from vie_gameemo.preprocess.face_crop import _tight_face_crop
@@ -181,7 +247,9 @@ def extract_clip_features(
                         cropped = image_aug(cropped)
                     crops.append(cropped)
                     valid_mask.append(is_tight_face)
-            feat, _ = encoders["face"].encode(crops if crops else None, valid_mask=valid_mask)
+            feat, _ = encoders["face"].encode(
+                crops if crops else None, valid_mask=valid_mask, audio_energy=face_audio_energy,
+            )
             features["face"] = feat.squeeze(0)
 
     if "context" in encoders:

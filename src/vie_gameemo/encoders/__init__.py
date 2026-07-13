@@ -173,6 +173,11 @@ def get_face_encoder(cfg, device: str | torch.device = "cuda") -> nn.Module:
     # trained before that change.
     global_cfg = getattr(getattr(face_cfg, "dual_view", None), "global", None)
     peak_frame_source = getattr(global_cfg, "source", "auto_peak") if global_cfg else "auto_peak"
+    # peak_signal only takes effect when peak_frame_source="auto_peak" (see
+    # FaceEncoder.peak_signal docstring) — "visual" (default) reproduces the
+    # original fef0294 behavior; "audio_visual" additionally uses per-frame
+    # audio RMS energy to catch brief startle reactions.
+    peak_signal = getattr(global_cfg, "peak_signal", "visual") if global_cfg else "visual"
 
     return FaceEncoder(
         model_name=model_name,
@@ -180,6 +185,7 @@ def get_face_encoder(cfg, device: str | torch.device = "cuda") -> nn.Module:
         n_temporal_frames=n_temporal_frames,
         target_size=tuple(getattr(face_cfg, "target_size", (224, 224)) if face_cfg is not None else (224, 224)),
         peak_frame_source=peak_frame_source,
+        peak_signal=peak_signal,
         device=device,
     )
 
