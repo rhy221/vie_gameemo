@@ -290,9 +290,13 @@ def train_llm_perception(
             embed_fn = llm.get_input_embeddings()
             full_embeds = embed_fn(full["input_ids"])  # (B, L, H)
 
-            # Prepend soft tokens (multi-stream: fusion + per-modality)
+            # Prepend soft tokens (multi-stream: fusion + per-modality).
+            # llm_adapter is a plain nn.Module (float32 params) while the
+            # quantized LLM's embedding/lm_head stay in its native compute
+            # dtype (e.g. bfloat16) — cast to match or lm_head's F.linear
+            # fails with a dtype mismatch (see llm1_explanation.py's identical cast).
             n_soft = soft_tokens.shape[1]
-            inputs_embeds = torch.cat([soft_tokens, full_embeds], dim=1)
+            inputs_embeds = torch.cat([soft_tokens.to(full_embeds.dtype), full_embeds], dim=1)
             attn_mask = torch.cat([soft_mask, full["attention_mask"]], dim=1)
 
             # Labels: mask soft tokens + prompt tokens, only compute loss on target tokens
@@ -420,7 +424,7 @@ def _eval_llm_metrics(
 
                 text_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
                 text_embeds = llm.get_input_embeddings()(text_ids)
-                inputs_embeds = torch.cat([soft_tokens[i:i+1], text_embeds], dim=1)
+                inputs_embeds = torch.cat([soft_tokens[i:i+1].to(text_embeds.dtype), text_embeds], dim=1)
 
                 out_ids = llm.generate(
                     inputs_embeds=inputs_embeds,
@@ -748,7 +752,7 @@ def train_cognition(
             embed_fn = llm.get_input_embeddings()
             full_embeds = embed_fn(full["input_ids"])
 
-            inputs_embeds = torch.cat([soft_tokens, full_embeds], dim=1)
+            inputs_embeds = torch.cat([soft_tokens.to(full_embeds.dtype), full_embeds], dim=1)
             attn_mask = torch.cat([soft_mask, full["attention_mask"]], dim=1)
 
             lm_labels = full["input_ids"].clone()
