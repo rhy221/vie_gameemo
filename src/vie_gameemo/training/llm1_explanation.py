@@ -25,17 +25,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from vie_gameemo.training.losses import modality_dropout as _modality_dropout
+from vie_gameemo.utils.torch_compat import ensure_set_submodule_patch
 
-# PyTorch < 2.1 lacks nn.Module.set_submodule, which newer transformers/bitsandbytes
-# call during 4-bit quantization. Patch it if missing so quantization still works.
-if not hasattr(nn.Module, "set_submodule"):
-    def _set_submodule(self, target: str, module: nn.Module) -> None:
-        parts = target.split(".")
-        parent = self
-        for part in parts[:-1]:
-            parent = getattr(parent, part)
-        setattr(parent, parts[-1], module)
-    nn.Module.set_submodule = _set_submodule  # type: ignore[method-assign]
+ensure_set_submodule_patch()
 
 logger = logging.getLogger(__name__)
 

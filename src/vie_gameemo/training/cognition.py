@@ -20,6 +20,10 @@ from types import SimpleNamespace
 import torch
 from torch.utils.data import DataLoader
 
+from vie_gameemo.utils.torch_compat import ensure_set_submodule_patch
+
+ensure_set_submodule_patch()
+
 logger = logging.getLogger(__name__)
 
 
