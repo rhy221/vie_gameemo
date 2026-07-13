@@ -203,6 +203,10 @@ def train_llm_perception(
         trainable_params, lr=lp_cfg.learning_rate.llm,
         weight_decay=getattr(pcfg, "weight_decay", 0.01),
     )
+    # Flat tensor list for clip_grad_norm_ — trainable_params above is the
+    # optimizer's param-groups format (list of dicts), which clip_grad_norm_
+    # can't iterate directly (each "parameter" would be a dict, not a Tensor).
+    all_params = list(fusion.parameters()) + list(llm_adapter.parameters()) + list(llm.parameters())
 
     # Balanced sampler for LLM perception (same imbalance problem)
     train_loader = _maybe_balanced_sampler(train_loader, cfg)
@@ -321,7 +325,7 @@ def train_llm_perception(
 
             grad_accum = getattr(lp_cfg, "gradient_accumulation", 1)
             if (step + 1) % grad_accum == 0:
-                torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+                torch.nn.utils.clip_grad_norm_(all_params, 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
                 scheduler.step()
