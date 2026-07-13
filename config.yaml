@@ -371,6 +371,21 @@ visual_encoder:
         #     frame. Set here so it's ready for when you retrain with
         #     source="auto_peak"; dormant for now since source="middle_frame".
         peak_signal: "audio_visual"
+        # Whether to drop non-face fallback-crop frames (see face_crop.py
+        # `extract_streamer_face`'s `is_tight_face` / `valid_mask`) before peak
+        # selection and temporal sampling. See face_vit.py
+        # FaceEncoder.filter_invalid_frames docstring:
+        #   true  (default, behavior since commit bd50d9c "fix face and
+        #     extract"): frames where MediaPipe couldn't find a face (crop
+        #     fell back to the wider webcam region) are excluded, so they
+        #     can't inject non-face signal into peak/temporal selection.
+        #   false (legacy, commit 95ab48e and earlier — pre valid_mask):
+        #     every frame is used as-is, including fallback crops. Set this
+        #     to reproduce features/checkpoints from before bd50d9c.
+        # Changing this changes cached "face" feature CONTENT, not just shape
+        # (see _config_hash in extract_features.py, which hashes this too —
+        # re-extract explicitly after changing it).
+        filter_invalid_frames: true
       temporal:
         n_frames: 16             # sweet spot per spec ablation
         spatial_pool: [2, 2]     # 2x2 → 64 tokens/frame

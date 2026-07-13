@@ -178,6 +178,11 @@ def get_face_encoder(cfg, device: str | torch.device = "cuda") -> nn.Module:
     # original fef0294 behavior; "audio_visual" additionally uses per-frame
     # audio RMS energy to catch brief startle reactions.
     peak_signal = getattr(global_cfg, "peak_signal", "visual") if global_cfg else "visual"
+    # filter_invalid_frames: True (default, behavior since commit bd50d9c) drops
+    # non-face fallback-crop frames before peak selection/temporal sampling; set
+    # to False in config.yaml to reproduce pre-bd50d9c (commit 95ab48e) behavior,
+    # which used every frame as-is. See FaceEncoder.filter_invalid_frames docstring.
+    filter_invalid_frames = getattr(global_cfg, "filter_invalid_frames", True) if global_cfg else True
 
     return FaceEncoder(
         model_name=model_name,
@@ -186,6 +191,7 @@ def get_face_encoder(cfg, device: str | torch.device = "cuda") -> nn.Module:
         target_size=tuple(getattr(face_cfg, "target_size", (224, 224)) if face_cfg is not None else (224, 224)),
         peak_frame_source=peak_frame_source,
         peak_signal=peak_signal,
+        filter_invalid_frames=filter_invalid_frames,
         device=device,
     )
 

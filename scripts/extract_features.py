@@ -112,6 +112,12 @@ def _config_hash(cfg) -> str:
     face_global_cfg = getattr(getattr(face_cfg, "dual_view", None), "global", None)
     face_peak_source = getattr(face_global_cfg, "source", "auto_peak") if face_global_cfg else "auto_peak"
     face_peak_signal = getattr(face_global_cfg, "peak_signal", "visual") if face_global_cfg else "visual"
+    # filter_invalid_frames also changes cached "face" feature CONTENT (which
+    # frames feed peak selection/temporal sampling — see
+    # FaceEncoder.filter_invalid_frames), so it must be hashed too.
+    face_filter_invalid = (
+        getattr(face_global_cfg, "filter_invalid_frames", True) if face_global_cfg else True
+    )
 
     relevant = {
         "audio_type": getattr(cfg.audio_encoder, "type", "whisper"),
@@ -121,6 +127,7 @@ def _config_hash(cfg) -> str:
         "face": face_key,
         "face_peak_source": face_peak_source,
         "face_peak_signal": face_peak_signal,
+        "face_filter_invalid_frames": face_filter_invalid,
         "context": ctx_key,
         "text": getattr(cfg.text_encoder, "model", getattr(cfg.text_encoder, "model_name", "unknown")),
         "text_backend": getattr(cfg.text_encoder, "backend", getattr(cfg.text_encoder, "type", "xlmr")),

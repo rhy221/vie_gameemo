@@ -206,7 +206,7 @@ def train_llm1_stage_a(
     if quant_cfg is not None:
         lm_kwargs["quantization_config"] = quant_cfg
     else:
-        lm_kwargs["torch_dtype"] = torch.float16
+        lm_kwargs["torch_dtype"] = torch.bfloat16
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
@@ -384,7 +384,7 @@ def train_llm1_stage_b(
     if quant_cfg is not None:
         lm_kwargs["quantization_config"] = quant_cfg
     else:
-        lm_kwargs["torch_dtype"] = torch.float16
+        lm_kwargs["torch_dtype"] = torch.bfloat16
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
@@ -844,11 +844,17 @@ def _eval_agreement(
 # ------------------------------------------------------------------
 
 def _make_bnb_config(quantization: str):
+    """Build BitsAndBytesConfig for quantization.
+
+    compute_dtype=bfloat16, NOT float16 — see cognition.py::_make_bnb_config
+    docstring: mixing fp16-compute 4-bit layers with a bf16-native model's
+    un-quantized layers (embeddings, lm_head, norms) reliably produces NaN.
+    """
     try:
         from transformers import BitsAndBytesConfig
         if quantization == "4bit":
             return BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,
+                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
             )
         elif quantization == "8bit":

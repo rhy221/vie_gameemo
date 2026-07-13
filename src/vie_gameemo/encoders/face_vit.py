@@ -50,6 +50,7 @@ class FaceEncoder(nn.Module):
         target_size: tuple[int, int] = (224, 224),
         peak_frame_source: str = "auto_peak",
         peak_signal: str = "visual",
+        filter_invalid_frames: bool = True,
         device: str | torch.device = "cuda",
     ) -> None:
         """Initialize face encoder.
@@ -85,6 +86,20 @@ class FaceEncoder(nn.Module):
                     `encode`) — catches brief "startle" reactions (e.g. a
                     quick shocked/gasp) whose peak coincides with a vocal
                     spike more than with a visually-different frame.
+            filter_invalid_frames: See `visual_encoder.face_encoder.dual_view.
+                global.filter_invalid_frames` in config.yaml:
+                  - True (default, behavior since commit bd50d9c): drop frames
+                    where `valid_mask` (passed to `encode`) is False — i.e.
+                    frames where the crop pipeline fell back to a wider,
+                    non-face-only region — before peak selection and temporal
+                    sampling, so a bad frame can't inject non-face signal.
+                  - False (pre-bd50d9c / commit 95ab48e behavior): ignore
+                    `valid_mask` entirely and use every frame as-is, including
+                    fallback crops. Set this to reproduce features/checkpoints
+                    from before valid_mask filtering was introduced. Like
+                    `peak_frame_source`, this changes cached "face" feature
+                    CONTENT, not just shape (see `_config_hash` in
+                    extract_features.py, which hashes this too).
             device: Torch device.
         """
         super().__init__()
@@ -93,6 +108,7 @@ class FaceEncoder(nn.Module):
         self.n_temporal_frames = n_temporal_frames
         self.spatial_pool = spatial_pool
         self.target_size = target_size
+        self.filter_invalid_frames = filter_invalid_frames
         if peak_frame_source not in ("auto_peak", "middle_frame"):
             raise ValueError(
                 f"Unknown peak_frame_source: {peak_frame_source!r}. "
@@ -144,7 +160,9 @@ class FaceEncoder(nn.Module):
                 (background/hands/desk) can silently sit in the same
                 sequence as real face frames and inject non-face signal.
                 If None, or all frames are invalid, all frames are used
-                (matches previous behavior).
+                (matches previous behavior). Also ignored entirely (all
+                frames used as-is) when `self.filter_invalid_frames` is
+                False — see that flag's docstring above.
             audio_energy: Optional 1D array, same length as `face_crops`
                 (BEFORE valid_mask filtering — filtered internally the same
                 way), giving a per-frame audio energy value (e.g. short-time
@@ -165,7 +183,12 @@ class FaceEncoder(nn.Module):
 
         usable_crops = face_crops
         usable_energy = audio_energy
-        if valid_mask is not None and len(valid_mask) == len(face_crops) and any(valid_mask):
+        if (
+            self.filter_invalid_frames
+            and valid_mask is not None
+            and len(valid_mask) == len(face_crops)
+            and any(valid_mask)
+        ):
             usable_crops = [c for c, ok in zip(face_crops, valid_mask) if ok]
             if usable_energy is not None and len(usable_energy) == len(valid_mask):
                 mask_arr = np.asarray(valid_mask, dtype=bool)

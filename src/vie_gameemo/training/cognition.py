@@ -173,7 +173,7 @@ def train_llm_perception(
     if quant_cfg is not None:
         lm_kwargs["quantization_config"] = quant_cfg
     else:
-        lm_kwargs["torch_dtype"] = torch.float16
+        lm_kwargs["torch_dtype"] = torch.bfloat16
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
@@ -581,7 +581,7 @@ def train_cognition(
     if quant_cfg is not None:
         lm_kwargs["quantization_config"] = quant_cfg
     else:
-        lm_kwargs["torch_dtype"] = torch.float16
+        lm_kwargs["torch_dtype"] = torch.bfloat16
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
@@ -841,13 +841,21 @@ def build_llm_input_embeds(
 
 
 def _make_bnb_config(quantization: str):
-    """Build BitsAndBytesConfig for quantization."""
+    """Build BitsAndBytesConfig for quantization.
+
+    compute_dtype=bfloat16, NOT float16: modern base models (Qwen2.5/Qwen3,
+    Llama-3, ...) are bf16-native. Quantizing with an fp16 compute dtype
+    mixes fp16 (narrow dynamic range) arithmetic in the 4-bit layers with
+    bf16 (wide dynamic range) activations flowing through the surrounding
+    un-quantized layers (embeddings, lm_head, norms) — this mismatch
+    reliably produces NaN loss within the first few steps on these models.
+    """
     try:
         from transformers import BitsAndBytesConfig
         if quantization == "4bit":
             return BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
             )

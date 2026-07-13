@@ -69,6 +69,25 @@ def parse_args() -> argparse.Namespace:
             "deliberately test robustness to a missing modality."
         ),
     )
+    parser.add_argument(
+        "--llm-perception-ckpt", type=Path, default=None,
+        help=(
+            "Evaluate a Stage 2a 'llm_perception_best.pt' checkpoint (from "
+            "train.py --stage llm_perception) instead of the MLP perception "
+            "checkpoint. Reuses the same in-training eval "
+            "(cognition._eval_llm_metrics) on a full split with a "
+            "configurable --n-samples, rather than training's fixed "
+            "50-sample per-epoch check. If the checkpoint was trained with "
+            "use_mlp_hint=True, also pass --checkpoint pointing to the "
+            "matching perception_best.pt (needed to load the frozen "
+            "classifier for the hint)."
+        ),
+    )
+    parser.add_argument(
+        "--n-samples", type=int, default=200,
+        help="Max samples to evaluate for --llm-perception-ckpt (generation "
+             "is slow — this is a subset of --split, not the whole split).",
+    )
     parser.add_argument("--output", type=Path, default=Path("outputs/results/eval.json"))
     return parser.parse_args()
 
@@ -80,7 +99,9 @@ def main() -> int:
     setup_logging(level=cfg.logging.level, log_file=Path(cfg.logging.file))
     set_seed(cfg.seed)
 
-    if args.ablation:
+    if args.llm_perception_ckpt:
+        results = _run_llm_perception_eval(cfg, args)
+    elif args.ablation:
         results = _run_ablation(cfg, args)
     else:
         if not args.checkpoint:
@@ -271,6 +292,128 @@ def _run_eval(cfg, args) -> dict:
         metrics["uar"],
     )
     return result
+
+
+def _run_llm_perception_eval(cfg, args) -> dict:
+    """Standalone eval of a Stage 2a 'llm_perception_best.pt' checkpoint.
+
+    Reuses `cognition._eval_llm_metrics` (the same metric computed during
+    training's per-epoch check) but on a full split with a configurable
+    sample budget, instead of training's fixed 50-sample check.
+    """
+    from torch.utils.data import DataLoader
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from vie_gameemo.data.dataset import VieGameEmoDataset, collate_fn
+    from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
+    from vie_gameemo.llm.modal_adapter import ModalAdapter
+    from vie_gameemo.training.cognition import _eval_llm_metrics, _make_bnb_config
+    from vie_gameemo.utils.torch_compat import ensure_set_submodule_patch
+
+    ensure_set_submodule_patch()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    fcfg = cfg.fusion
+    ccfg = cfg.classifier
+    llm_cfg = cfg.llm
+
+    ckpt = torch.load(args.llm_perception_ckpt, map_location="cpu", weights_only=False)
+    use_mlp_hint = ckpt.get("use_mlp_hint", False)
+
+    # Fusion: this checkpoint's own fine-tuned copy (NOT perception_best.pt's).
+    fusion = get_fusion(
+        fcfg.type, d_model=fcfg.d_model, n_modalities=fcfg.n_modalities,
+        n_conv_blocks=getattr(fcfg, "n_conv_blocks", 4),
+        kernel_size=getattr(fcfg, "kernel_size", 3),
+        align_to=getattr(fcfg, "align_to", "audio"),
+        return_attention=False,
+        skip_mlp_if_matched=getattr(fcfg, "skip_mlp_if_matched", False),
+        **modality_dim_kwargs(fcfg, features_dir=Path(cfg.paths.features)),
+    ).to(device)
+    fusion.load_state_dict(ckpt["fusion_state_dict"])
+    fusion.eval()
+
+    # Classifier only needed for the MLP-hint prompt variant; llm_perception_best.pt
+    # doesn't save it (classifier stays frozen), so it must come from perception_best.pt.
+    classifier = None
+    if use_mlp_hint:
+        if not args.checkpoint:
+            raise ValueError(
+                "This llm_perception checkpoint was trained with use_mlp_hint=True — "
+                "pass --checkpoint pointing to the matching perception_best.pt "
+                "to load the classifier needed for the hint."
+            )
+        from vie_gameemo.classifiers import get_classifier
+        from vie_gameemo.training.perception import infer_classifier_type_from_checkpoint
+
+        p_ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        classifier = get_classifier(
+            ccfg, d_model=fcfg.d_model, device=device,
+            classifier_type=infer_classifier_type_from_checkpoint(args.checkpoint),
+        )
+        classifier.load_state_dict(p_ckpt["classifier_state_dict"])
+        classifier.eval()
+
+    model_name = llm_cfg.base_model.name
+    quant_cfg = _make_bnb_config(llm_cfg.base_model.quantization)
+    lm_kwargs: dict = {"device_map": "auto"}
+    if quant_cfg is not None:
+        lm_kwargs["quantization_config"] = quant_cfg
+    else:
+        lm_kwargs["torch_dtype"] = torch.bfloat16
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    llm = AutoModelForCausalLM.from_pretrained(model_name, **lm_kwargs)
+
+    if ckpt.get("llm_peft") is not None:
+        from peft import LoraConfig, get_peft_model
+
+        lp_cfg = getattr(cfg.training, "llm_perception", None) or cfg.training.cognition
+        lora_cfg_ns = lp_cfg.lora
+        lora_config = LoraConfig(
+            r=lora_cfg_ns.rank, lora_alpha=lora_cfg_ns.alpha,
+            target_modules=list(lora_cfg_ns.target_modules),
+            bias="none", task_type="CAUSAL_LM",
+        )
+        llm = get_peft_model(llm, lora_config)
+        llm.load_state_dict(ckpt["llm_peft"], strict=False)
+    llm.eval()
+
+    llm_hidden_size = llm.config.hidden_size
+    llm_adapter = ModalAdapter(d_fusion=fcfg.d_model, d_llm=llm_hidden_size).to(device)
+    llm_adapter.load_state_dict(ckpt["llm_adapter"])
+    llm_adapter.eval()
+
+    annotations_dir = Path(cfg.paths.annotations)
+    splits_path = Path(getattr(cfg.paths, "split_manifest", "data/splits.json"))
+    dataset = VieGameEmoDataset(
+        annotations_dir=annotations_dir,
+        features_dir=Path(cfg.paths.features),
+        split=args.split,
+        merge_mode=getattr(cfg.labeling, "merge_mode", "none"),
+        split_manifest=splits_path if splits_path.exists() else None,
+    )
+    loader = DataLoader(dataset, batch_size=8, shuffle=False, collate_fn=collate_fn)
+
+    metrics = _eval_llm_metrics(
+        fusion, llm_adapter, llm, tokenizer, loader, device,
+        use_mlp_hint, classifier, n_samples=args.n_samples,
+    )
+
+    logger.info(
+        "llm_perception eval | split=%s | acc=%.4f | macro_f1=%.4f | format_rate=%.4f | n=%d",
+        args.split, metrics["accuracy"], metrics["macro_f1"],
+        metrics["format_rate"], metrics["n_samples"],
+    )
+    return {
+        "stage": "llm_perception",
+        "checkpoint": str(args.llm_perception_ckpt),
+        "use_mlp_hint": use_mlp_hint,
+        "split": args.split,
+        "metrics": metrics,
+    }
 
 
 def _run_ablation(cfg, args) -> dict:
