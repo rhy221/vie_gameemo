@@ -587,9 +587,14 @@ llm:
   cognition_checkpoint: null   # e.g. "outputs/checkpoints/cognition_best.pt"
 
   # Shared base model
+  # NOTE: `name` and `fallback` are NOT an automatic try/fallback pair — each
+  # training script hardcodes which one it reads (cognition.py always uses
+  # `name`; llm1_explanation.py always uses `fallback`, regardless of `name`).
+  # Keep both in sync (same model) unless you deliberately want
+  # llm1_explanation to run a different/smaller model than llm_perception/cognition.
   base_model:
-    name: "Qwen/Qwen2.5-32B-Instruct"
-    fallback: "Qwen/Qwen2.5-7B-Instruct"
+    name: "Qwen/Qwen3-8B"
+    fallback: "Qwen/Qwen3-8B"
     quantization: "4bit"
     device_map: "auto"
     max_new_tokens: 300
