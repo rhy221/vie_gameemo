@@ -203,7 +203,7 @@ def _run_eval(cfg, args) -> dict:
         collate_fn=collate_fn,
     )
 
-    all_preds, all_labels, all_meta = [], [], []
+    all_preds, all_labels, all_meta, all_probs = [], [], [], []
     with torch.no_grad():
         for batch in loader:
             audio = batch["audio"].to(device)
@@ -220,9 +220,11 @@ def _run_eval(cfg, args) -> dict:
                 fused = fused[0]
             logits = classifier(fused)
             preds = logits.argmax(dim=-1)
+            probs = torch.softmax(logits, dim=-1)
 
             all_preds.extend(preds.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
+            all_probs.extend(probs.cpu().tolist())
 
             clip_ids = batch.get("clip_id", [""] * len(labels))
             genres = batch.get("genre", ["unknown"] * len(labels))
@@ -239,6 +241,7 @@ def _run_eval(cfg, args) -> dict:
         all_labels, all_preds,
         n_classes=ccfg.n_classes,
         label_names=class_names,
+        y_proba=all_probs,
     )
     cm = metrics.pop("confusion_matrix").tolist()
     metrics["confusion_matrix"] = cm
@@ -284,12 +287,16 @@ def _run_eval(cfg, args) -> dict:
         reasoning_result.pop("per_sample", None)
         result["reasoning_eval"] = reasoning_result
 
+    roc_auc = metrics.get("macro_roc_auc")
+    pr_auc = metrics.get("macro_pr_auc")
     logger.info(
-        "split=%s | acc=%.4f | macro_f1=%.4f | uar=%.4f",
+        "split=%s | acc=%.4f | macro_f1=%.4f | uar=%.4f | macro_roc_auc=%s | macro_pr_auc=%s",
         args.split,
         metrics["accuracy"],
         metrics["macro_f1"],
         metrics["uar"],
+        f"{roc_auc:.4f}" if roc_auc is not None else "n/a",
+        f"{pr_auc:.4f}" if pr_auc is not None else "n/a",
     )
     return result
 

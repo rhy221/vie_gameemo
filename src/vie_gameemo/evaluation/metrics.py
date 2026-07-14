@@ -2,11 +2,13 @@
 
 import numpy as np
 from sklearn.metrics import (
+    average_precision_score,
     cohen_kappa_score,
     confusion_matrix,
     f1_score,
     precision_score,
     recall_score,
+    roc_auc_score,
 )
 
 
@@ -15,6 +17,7 @@ def compute_metrics(
     y_pred: list[int] | np.ndarray,
     n_classes: int,
     label_names: list[str] | None = None,
+    y_proba: list[list[float]] | np.ndarray | None = None,
 ) -> dict:
     """Compute full metrics dict.
 
@@ -23,6 +26,10 @@ def compute_metrics(
         y_pred: Predicted labels.
         n_classes: Number of classes.
         label_names: Optional class names for confusion matrix readability.
+        y_proba: Optional (n_samples, n_classes) softmax probabilities. When
+            given, adds macro-averaged one-vs-rest ROC-AUC and PR-AUC (average
+            precision). Omit to skip these (they require class probabilities,
+            not just the argmax prediction in y_pred).
 
     Returns:
         Dict with keys:
@@ -32,6 +39,7 @@ def compute_metrics(
             - uar: float (unweighted average recall)
             - per_class_f1: dict[class_name → float]
             - confusion_matrix: 2D ndarray
+            - macro_roc_auc, macro_pr_auc: float, only when y_proba is given
     """
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
@@ -55,7 +63,7 @@ def compute_metrics(
 
     cm = confusion_matrix(y_true, y_pred, labels=all_classes)
 
-    return {
+    result = {
         "accuracy": accuracy,
         "macro_f1": macro_f1,
         "weighted_f1": weighted_f1,
@@ -65,6 +73,28 @@ def compute_metrics(
         "per_class_precision": per_class_precision,
         "confusion_matrix": cm,
     }
+
+    if y_proba is not None:
+        y_proba = np.asarray(y_proba)
+        # one-hot y_true so a class absent from this split's y_true doesn't
+        # crash roc_auc_score/average_precision_score (zero_division-style
+        # skip instead of raising, matching the zero_division=0 policy above).
+        y_true_onehot = np.zeros((len(y_true), n_classes), dtype=int)
+        y_true_onehot[np.arange(len(y_true)), y_true] = 1
+        present = y_true_onehot.sum(axis=0) > 0
+        if present.sum() >= 2:
+            result["macro_roc_auc"] = float(roc_auc_score(
+                y_true_onehot[:, present], y_proba[:, present],
+                average="macro", multi_class="ovr",
+            ))
+            result["macro_pr_auc"] = float(average_precision_score(
+                y_true_onehot[:, present], y_proba[:, present], average="macro",
+            ))
+        else:
+            result["macro_roc_auc"] = None
+            result["macro_pr_auc"] = None
+
+    return result
 
 
 def format_confusion_matrix(
