@@ -94,7 +94,18 @@ class WhisperAudioEncoder(nn.Module):
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
         audio, _ = librosa.load(str(audio_path), sr=self.sample_rate, mono=True)
+        return self.encode_waveform(audio)
 
+    @torch.no_grad()
+    def encode_waveform(self, audio) -> Tensor:
+        """Encode a raw waveform array (mono, `sample_rate` Hz).
+
+        Args:
+            audio: 1-D float array at ``self.sample_rate``.
+
+        Returns:
+            Tensor of shape (1, target_tokens, d_out).
+        """
         inputs = self.feature_extractor(
             audio,
             sampling_rate=self.sample_rate,

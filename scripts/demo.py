@@ -5,7 +5,11 @@ Two modes:
     --mode realtime: webcam or screen capture, sliding-window inference
 
 Usage:
-    python scripts/demo.py --config config.yaml --checkpoint outputs/checkpoints/best.pt --mode batch
+    # Perception only (default; runs with just perception_best.pt):
+    python scripts/demo.py --config config.yaml --checkpoint web_demo/perception_best.pt --mode batch
+
+    # With LLM reasoning (needs an LLM adapter checkpoint configured in config.yaml):
+    python scripts/demo.py --config config.yaml --checkpoint web_demo/perception_best.pt --mode batch --enable-llm
 """
 
 from __future__ import annotations
@@ -55,6 +59,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["batch", "realtime"], default="batch")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true", help="Share via Gradio public URL")
+    parser.add_argument(
+        "--enable-llm",
+        action="store_true",
+        help="Enable LLM reasoning (requires an LLM adapter checkpoint). "
+             "Off by default so the demo runs with only the perception checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -77,7 +87,11 @@ def main() -> int:
         demo = _build_realtime_demo(cfg, args)
 
     logger.info("Launching Gradio demo on port %d (share=%s)", args.port, args.share)
-    demo.launch(server_port=args.port, share=args.share)
+    # Enable the queue so generator functions stream intermediate updates
+    # (per-batch timeline rows) to the browser as they are produced.
+    demo.queue()
+    # Gradio 6 moved `css` from Blocks(...) to launch(...).
+    demo.launch(server_port=args.port, share=args.share, css=_DEMO_CSS)
     return 0
 
 
@@ -102,7 +116,7 @@ def _build_batch_demo(cfg, args):
                 checkpoint=args.checkpoint,
                 cfg=cfg,
                 output_json=tmp_out,
-                include_llm_explanation=True,
+                include_llm_explanation=args.enable_llm,
                 use_cached_features=False,
             )
             results = json.loads(tmp_out.read_text(encoding="utf-8"))
@@ -131,6 +145,8 @@ def _build_batch_demo(cfg, args):
             ]
             scores_md = "\n".join(score_lines)
 
+            if not args.enable_llm:
+                reasoning = "_LLM reasoning disabled (run with --enable-llm)._"
             return label_html, scores_md, reasoning or "_Reasoning not available_"
         except Exception as exc:
             logger.error("Prediction failed: %s", exc)
@@ -139,10 +155,12 @@ def _build_batch_demo(cfg, args):
             if tmp_out.exists():
                 tmp_out.unlink(missing_ok=True)
 
+    llm_note = "" if args.enable_llm else " _(LLM reasoning off — perception only)_"
     with gr.Blocks(title="Vie-GameEmo — Game Streamer Emotion Recognition") as demo:
         gr.Markdown(
             "# Vie-GameEmo Demo\n"
             "Upload a Vietnamese game livestream clip to analyze the streamer's emotion."
+            + llm_note
         )
         with gr.Row():
             with gr.Column(scale=1):
@@ -152,7 +170,8 @@ def _build_batch_demo(cfg, args):
                 label_output = gr.HTML(label="Predicted Emotion")
                 scores_output = gr.Markdown(label="Class Scores")
                 reasoning_output = gr.Textbox(
-                    label="LLM Reasoning", lines=6, interactive=False
+                    label="LLM Reasoning", lines=6, interactive=False,
+                    visible=args.enable_llm,
                 )
 
         predict_btn.click(
@@ -173,70 +192,153 @@ def _build_batch_demo(cfg, args):
 # Real-time mode
 # ---------------------------------------------------------------------------
 
+# Disable Gradio's orange "generating" highlight and style the status banner.
+# In Gradio 6 `css` is passed to launch(), not the Blocks constructor.
+_DEMO_CSS = """
+.generating, .pending { border-color: transparent !important;
+    box-shadow: none !important; animation: none !important; }
+.progress-bar, .meta-text-center { display: none !important; }
+.vg-status { font-size: 0.95em; opacity: 0.75; margin: 2px 0; }
+.vg-err { color: #dc2626; opacity: 1; }
+"""
+
+
+def _fmt_ts(sec: float) -> str:
+    """Format seconds as M:SS."""
+    m, s = divmod(int(round(sec)), 60)
+    return f"{m}:{s:02d}"
+
+
+def _status_html(text: str, state: str = "busy") -> str:
+    """Render a minimal, low-key status line."""
+    return f'<div class="vg-status vg-{state}">{text}</div>'
+
+
+def _timeline_rows(history: list[dict]) -> str:
+    """Format prediction history as a Markdown table.
+
+    A Markdown component (unlike gr.Dataframe) reliably re-renders on every
+    generator yield, so the table grows live as each batch finishes.
+    """
+    header = (
+        "| Đoạn (thời gian) | Cảm xúc chủ đạo | Độ tin cậy |\n"
+        "|---|---|---|\n"
+    )
+    if not history:
+        return header + "| _(chưa có)_ | | |"
+    lines = []
+    for i, item in enumerate(history, 1):
+        label = item.get("label", "?")
+        emoji = _EMOTION_EMOJI.get(label, "❓")
+        start = item.get("start_sec", 0)
+        end = item.get("end_sec", 0)
+        conf = item.get("confidence", 0)
+        lines.append(
+            f"| #{i}  {_fmt_ts(start)} – {_fmt_ts(end)} | {emoji} {label} | {conf:.0%} |"
+        )
+    return header + "\n".join(lines)
+
+
+def _timeline_summary(history: list[dict]) -> str:
+    """Build a dominant-emotion + distribution summary from history."""
+    if not history:
+        return ""
+    from collections import Counter
+    counts = Counter(h.get("label", "?") for h in history)
+    total = len(history)
+    dom, dom_n = counts.most_common(1)[0]
+    lines = [
+        f"### {_EMOTION_EMOJI.get(dom, '')} Cảm xúc chủ đạo: **{dom}** "
+        f"({dom_n}/{total} đoạn)",
+        "",
+        "**Phân bố cảm xúc theo các đoạn:**",
+    ]
+    for label, n in counts.most_common():
+        bar = "█" * max(1, round(20 * n / total))
+        lines.append(f"- {_EMOTION_EMOJI.get(label, '')} `{label:<9}` {bar} {n / total:.0%}")
+    return "\n".join(lines)
+
+
 def _build_realtime_demo(cfg, args):
-    """Gradio Blocks app: live sliding-window predictions from webcam/video."""
+    """Gradio Blocks app: drop a long video → per-window emotion timeline."""
     import gradio as gr
 
     from vie_gameemo.inference.realtime import RealtimeInferenceRunner
 
-    runner_state: dict = {"runner": None, "history": []}
+    # Fixed settings: 5s batches, audio always on.
+    _BATCH_SECONDS = 5.0
 
-    def start_inference(video_path: str | None) -> str:
+    def analyze_timeline(video_path: str | None):
+        """Generator: yields (status, timeline_rows, summary) per 5s batch.
+
+        Runs in Gradio's worker thread and yields after each batch so the UI
+        renders that row before the next (heavy) batch is computed.
+        """
         if video_path is None:
-            return "Please upload a video file."
-        runner_state["history"] = []
+            yield _status_html("Chưa có video — thả một clip vào ô bên trái.", "err"), _timeline_rows([]), ""
+            return
+
+        yield _status_html("Đang nạp mô hình nhận diện cảm xúc… (lần đầu ~30–60s)"), _timeline_rows([]), ""
+
+        # Non-overlapping batches: window == step so each segment is analysed once.
         runner = RealtimeInferenceRunner(
             checkpoint=args.checkpoint,
             cfg=cfg,
-            window_seconds=5.0,
-            step_seconds=1.0,
-            max_latency_ms=600.0,
+            window_seconds=_BATCH_SECONDS,
+            step_seconds=_BATCH_SECONDS,
             skip_llm=True,
+            drop_slow_windows=False,  # keep every batch when analysing a file
+            use_audio=True,
         )
-        runner_state["runner"] = runner
 
-        def on_pred(pred):
-            runner_state["history"].append(pred)
+        yield _status_html("Đang phát hiện vùng webcam & tách âm thanh…"), _timeline_rows([]), ""
 
-        import threading
-        t = threading.Thread(
-            target=runner.process_stream,
-            kwargs={"source": Path(video_path), "on_prediction": on_pred},
-            daemon=True,
-        )
-        t.start()
-        runner_state["thread"] = t
-        return "Inference started..."
-
-    def get_history() -> str:
-        history = runner_state.get("history", [])
-        if not history:
-            return "_No predictions yet..._"
-        lines = []
-        for item in history[-10:]:
-            label = item.get("label", "?")
-            conf = item.get("confidence", 0)
-            t_start = item.get("start_sec", 0)
-            t_end = item.get("end_sec", 0)
-            emoji = _EMOTION_EMOJI.get(label, "❓")
-            lines.append(
-                f"[{t_start:.1f}s–{t_end:.1f}s] {emoji} **{label}** ({conf:.1%})"
+        history: list[dict] = []
+        try:
+            for pred in runner.iter_predictions(Path(video_path)):
+                history.append(pred)
+                t = _fmt_ts(pred.get("start_sec", 0))
+                t2 = _fmt_ts(pred.get("end_sec", 0))
+                yield (
+                    _status_html(
+                        f"Đang phân tích… xong đoạn {len(history)} ({t}–{t2}). "
+                        f"Đang xử lý đoạn tiếp theo…"
+                    ),
+                    _timeline_rows(history),
+                    _timeline_summary(history),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Timeline analysis failed: %s", exc)
+            yield (
+                _status_html(f"Lỗi: {exc}", "err"),
+                _timeline_rows(history),
+                _timeline_summary(history),
             )
-        return "\n".join(lines)
+            return
 
-    with gr.Blocks(title="Vie-GameEmo — Real-time Demo") as demo:
-        gr.Markdown("# Vie-GameEmo Real-time Demo\nSliding-window emotion tracking.")
+        yield (
+            _status_html(f"Xong — đã phân tích {len(history)} đoạn (mỗi đoạn 5s).", "done"),
+            _timeline_rows(history),
+            _timeline_summary(history),
+        )
+
+    with gr.Blocks(title="Vie-GameEmo — Dòng thời gian cảm xúc") as demo:
+        gr.Markdown("# Vie-GameEmo — Phân tích cảm xúc theo đoạn")
         with gr.Row():
-            with gr.Column():
-                video_input = gr.Video(label="Upload video (or use webcam)")
-                start_btn = gr.Button("Start", variant="primary")
-                status = gr.Textbox(label="Status", interactive=False)
-            with gr.Column():
-                history_md = gr.Markdown(label="Prediction history (last 10 windows)")
-                refresh_btn = gr.Button("Refresh")
+            with gr.Column(scale=1):
+                video_input = gr.Video(label="Thả video vào đây")
+                analyze_btn = gr.Button("Phân tích (mỗi đoạn 5s)", variant="primary")
+                status = gr.HTML(_status_html("Sẵn sàng.", "done"))
+            with gr.Column(scale=2):
+                summary_md = gr.Markdown()
+                gr.Markdown("### Kết quả theo từng đoạn")
+                timeline_df = gr.Markdown(_timeline_rows([]))
 
-        start_btn.click(fn=start_inference, inputs=[video_input], outputs=[status])
-        refresh_btn.click(fn=get_history, inputs=[], outputs=[history_md])
+        analyze_btn.click(
+            fn=analyze_timeline,
+            inputs=[video_input],
+            outputs=[status, timeline_df, summary_md],
+        )
 
     return demo
 

@@ -107,7 +107,7 @@ def batch_inference(
 def _load_model(checkpoint: Path, cfg: SimpleNamespace, device: torch.device):
     """Load fusion + classifier from perception checkpoint."""
     from vie_gameemo.classifiers.mlp import EmotionClassifier
-    from vie_gameemo.fusion import get_fusion
+    from vie_gameemo.fusion import get_fusion, modality_dim_kwargs
     from vie_gameemo.training.perception import load_checkpoint
 
     fcfg = cfg.fusion
@@ -121,6 +121,7 @@ def _load_model(checkpoint: Path, cfg: SimpleNamespace, device: torch.device):
         kernel_size=getattr(fcfg, "kernel_size", 3),
         align_to=getattr(fcfg, "align_to", "audio"),
         return_attention=True,
+        **modality_dim_kwargs(fcfg),
     ).to(device)
     classifier = EmotionClassifier(
         d_model=fcfg.d_model,
@@ -201,8 +202,7 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
     frames_dir.mkdir(exist_ok=True)
 
     extract_audio(clip_path, audio_path)
-    extract_frames(clip_path, frames_dir, target_fps=4)
-    frame_paths = sorted(frames_dir.glob("*.jpg"))
+    frame_paths = extract_frames(clip_path, frames_dir, fps=4)
 
     # Detect webcam region for context encoder
     from vie_gameemo.preprocess.webcam_detector import WebcamDetector
@@ -249,7 +249,13 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
 
     from vie_gameemo.encoders.face_vit import FaceEncoder
     face_enc = FaceEncoder()
-    face_tensor, has_face = face_enc.encode(frame_paths)
+    if webcam_bbox is not None:
+        from vie_gameemo.preprocess.face_crop import batch_extract_faces
+        face_crops = list(batch_extract_faces(frame_paths, webcam_bbox))
+        face_tensor, has_face = face_enc.encode(face_crops)
+    else:
+        # No facecam detected → no-face placeholder (zeros).
+        face_tensor, has_face = face_enc.encode(None)
     features["face"] = face_tensor
     features["has_face"] = has_face
     del face_enc
@@ -259,13 +265,24 @@ def _extract_features_inline(clip_path: Path, cfg: SimpleNamespace) -> dict:
 
 def _forward(fusion, classifier, features: dict, device: torch.device) -> dict:
     """Run one forward pass, return label + confidence."""
-    audio = features["audio"].unsqueeze(0).to(device)
-    face = features["face"].unsqueeze(0).to(device)
-    context = features["context"].unsqueeze(0).to(device)
-    text = features["text"].unsqueeze(0).to(device)
+    def _prep(t: torch.Tensor) -> torch.Tensor:
+        # Normalize to (B=1, T, D). Encoders emit (1, T, D); cached features
+        # may be (T, D). Strip an existing leading batch dim before adding ours
+        # so we never end up with a spurious 4th dimension.
+        t = t.to(device)
+        if t.dim() == 3 and t.shape[0] == 1:
+            t = t.squeeze(0)
+        return t.unsqueeze(0)
+
+    audio = _prep(features["audio"])
+    face = _prep(features["face"])
+    context = _prep(features["context"])
+    text = _prep(features["text"])
     has_face = features.get("has_face")
     if has_face is not None:
-        has_face = torch.tensor([[has_face]], dtype=torch.bool, device=device)
+        # Fusion expects shape (B,), not (B, 1) — an extra dim here broadcasts
+        # the face-mask into a spurious 4th dimension.
+        has_face = torch.tensor([has_face], dtype=torch.bool, device=device)
 
     with torch.no_grad():
         fused = fusion(audio, face, context, text, has_face=has_face)

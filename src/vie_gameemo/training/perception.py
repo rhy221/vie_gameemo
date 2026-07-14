@@ -385,7 +385,19 @@ def load_checkpoint(
     Returns:
         Restored TrainingState.
     """
-    ckpt = torch.load(path, map_location="cpu")
+    import sys, types
+    # Older checkpoints may reference the long-removed ``torch.utils.serialization``
+    # module. Only install an empty stub when the real module is unavailable —
+    # newer torch ships a real ``torch.utils.serialization`` (with ``config``)
+    # that ``torch.load`` depends on, and clobbering it breaks loading.
+    try:
+        import torch.utils.serialization  # noqa: F401
+    except ImportError:
+        sys.modules.setdefault(
+            "torch.utils.serialization",
+            types.ModuleType("torch.utils.serialization"),
+        )
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
     fusion.load_state_dict(ckpt["fusion_state_dict"])
     classifier.load_state_dict(ckpt["classifier_state_dict"])
     if optimizer is not None and "optimizer_state_dict" in ckpt:
@@ -411,7 +423,19 @@ def infer_fusion_dims_from_checkpoint(path: Path, d_model: int) -> dict[str, int
     modalities need no override, and emitting them would break baseline
     fusions that don't accept ``*_dim`` kwargs.
     """
-    ckpt = torch.load(path, map_location="cpu")
+    import sys, types
+    # Older checkpoints may reference the long-removed ``torch.utils.serialization``
+    # module. Only install an empty stub when the real module is unavailable —
+    # newer torch ships a real ``torch.utils.serialization`` (with ``config``)
+    # that ``torch.load`` depends on, and clobbering it breaks loading.
+    try:
+        import torch.utils.serialization  # noqa: F401
+    except ImportError:
+        sys.modules.setdefault(
+            "torch.utils.serialization",
+            types.ModuleType("torch.utils.serialization"),
+        )
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
     sd = ckpt.get("fusion_state_dict", {})
     dims: dict[str, int] = {}
     for mod in ("audio", "face", "context", "text"):
