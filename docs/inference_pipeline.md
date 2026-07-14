@@ -21,6 +21,11 @@ Không bao gồm quá trình training hay annotation.
 | disgusted | 74 | 17 | 16 | 107 | 3.1% |
 | **TOTAL** | **2389** | **513** | **497** | **3399** | 100% |
 
+Xử lý class imbalance khi training :
+1. Effective Number Class Weights
+2. Focal Loss (γ=2.0) + class weights làm α
+3. Balanced Batch Sampler
+
 Dataset mất cân bằng nặng: `neutral` chiếm 41.7%, `disgusted` chỉ 3.1%.
 
 ### Xử lý class imbalance khi training
@@ -84,7 +89,6 @@ val_macro_f1 tính trung bình F1 không weight → một model chỉ predict `n
 | val_accuracy | **85.6%** |
 | val_macro_f1 | **0.8169** |
 | val_UAR | **0.8299** |
-| val_loss | 0.0025 |
 
 Per-class val:
 
@@ -168,8 +172,8 @@ video clip (~5s)
     │       └── u_fusion = F_conv + F_attn  →  (1, 64, 768)
     │
     ├── 4. Classifier
-    │       └── MLP: u_fusion → mean pool → Linear(768→256)+GELU+Dropout → Linear(256→8) → logits → nhãn
-    │                                                                    → [penult tap (1,256)] 
+           └── MLP: u_fusion → mean pool → Linear(768→256)+GELU+Dropout → Linear(256→8) → logits → nhãn
+                                                                       
     │
     └── 5. LLM
             │
